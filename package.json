@@ -1,0 +1,77 @@
+{
+    "name": "bandcamp-rpc",
+    "version": "1.0.0",
+    "description": "🎵 A standalone Bandcamp Desktop Client with Linux/Win support and Discord Rich Presence",
+    "author": "elricfd <elricfd@users.noreply.github.com>",
+    "homepage": "https://github.com/elricfd/bandcamp-rpc",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/elricfd/bandcamp-rpc.git"
+    },
+    "main": "./tsc/main.js",
+    "scripts": {
+        "copy-header": "cpx \"src/**/*.html\" tsc",
+        "dev": "tsc && npm run copy-header && electron ./tsc/main.js --dev",
+        "build-win": "tsc && npm run copy-header && electron-builder -w nsis",
+        "build-win-ptb": "tsc && npm run copy-header && electron-builder -w portable",
+        "build-linux": "tsc && npm run copy-header && electron-builder -l deb appimage"
+    },
+    "build": {
+        "appId": "com.bandcamp.desktop",
+        "productName": "Bandcamp",
+        "asar": true,
+        "directories": {
+            "output": "build"
+        },
+        "files": [
+            "tsc/**/*",
+            "assets/**/*",
+            "!node_modules/electron/**/*"
+        ],
+        "win": {
+            "target": "nsis",
+            "icon": "assets/bandcamp-button-circle-black-512.png"
+        },
+        "nsis": {
+            "oneClick": false,
+            "perMachine": false,
+            "allowToChangeInstallationDirectory": true,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true,
+            "shortcutName": "Bandcamp",
+            "uninstallDisplayName": "Bandcamp ${version}",
+            "artifactName": "${productName}-Setup-${version}.${ext}"
+        },
+        "linux": {
+            "target": [
+                "AppImage",
+                "deb"
+            ],
+            "category": "AudioVideo",
+            "icon": "assets/bandcamp-button-circle-black-512.png",
+            "maintainer": "elricfd <elricfd@users.noreply.github.com>"
+        }
+    },
+    "devDependencies": {
+        "@types/node": "^24.0.0",
+        "cpx": "^1.5.0",
+        "electron": "^36.0.0",
+        "electron-builder": "^26.7.0",
+        "typescript": "^5.9.0"
+    },
+    "dependencies": {
+        "@ghostery/adblocker-electron": "^2.11.3",
+        "@xhayper/discord-rpc": "^1.3.0",
+        "cross-fetch": "^4.0.0",
+        "darkreader": "^4.9.128",
+        "electron-store": "^8.2.0",
+        "electron-updater": "^6.8.9",
+        "present": "^1.0.0",
+        "scripts": "^0.1.0"
+    },
+    "allowScripts": {
+        "core-js@2.6.12": true,
+        "electron@36.9.5": true,
+        "electron-winstaller@5.4.0": true
+    }
+}
