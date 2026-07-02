@@ -78,7 +78,8 @@ function render(): void {
     const progress = loading ? ` — loading… ${expected ? items.length + ' / ' + expected : items.length}` : '';
     countEl.textContent = list.length + total + ' releases' + progress;
     if (!list.length) { if (!loading) setState('nothing matches your search.'); return; }
-    grid.innerHTML = '';
+    grid.innerHTML = ''; // drops any open inline tracklist
+    tlEl = null; openId = '';
     const frag = document.createDocumentFragment();
     for (const it of list) {
         const card = document.createElement('div');
@@ -115,15 +116,81 @@ function render(): void {
             `<div class="a">${escapeHtml(it.artist)}</div>` +
             `<div class="y">${it.year || ''}</div>`;
         card.appendChild(meta);
-        card.addEventListener('click', () => play(it));
+        // clicking a cover expands its tracklist inline (rather than auto-playing)
+        card.addEventListener('click', () => toggleTracklist(it, card));
         frag.appendChild(card);
     }
     grid.appendChild(frag);
 }
 
-// resolve release and hand it to player
-async function play(it: CollectionItem): Promise<void> {
-    await ipcRenderer.invoke('collection:play', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
+// play a release, optionally starting at a chosen track index (queue becomes the
+// whole album; the rest queues behind the chosen track)
+async function play(it: CollectionItem, activeIndex = 0): Promise<void> {
+    await ipcRenderer.invoke('collection:play', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, activeIndex });
+}
+
+// --- inline tracklist -------------------------------------------------------
+// clicking a cover expands a full-width panel inline after that release's row; the
+// grid still scrolls normally and clicking the cover again collapses it.
+let tlEl: HTMLElement | null = null;
+let openId = '';
+function closeTracklist(): void { if (tlEl) { tlEl.remove(); tlEl = null; } openId = ''; }
+const fmtDur = (s: number): string => (!s || s < 0 ? '' : `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`);
+
+// the last card element on the same visual row as `card` (so the panel drops below
+// the whole row, not mid-row) regardless of how many columns are showing
+function endOfRow(card: HTMLElement): HTMLElement {
+    const cards = Array.from(grid.querySelectorAll('.card')) as HTMLElement[];
+    const top = card.offsetTop;
+    let last = card;
+    for (const c of cards) { if (c.offsetTop === top) last = c; else if (c.offsetTop > top) break; }
+    return last;
+}
+
+async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<void> {
+    const id = it.tralbumType + it.tralbumId;
+    const wasOpen = openId === id && !!tlEl;
+    closeTracklist();
+    if (wasOpen) return; // second click on the same release closes it
+    openId = id;
+    const panel = document.createElement('div');
+    panel.className = 'tlinline';
+    panel.addEventListener('click', (e) => e.stopPropagation());
+    panel.innerHTML =
+        `<div class="tlleft"><img class="tlart" src="${it.art}">` +
+        `<div class="tltitle">${escapeHtml(it.title)}</div>` +
+        `<div class="tlartist">${escapeHtml(it.artist)}</div>` +
+        `<div class="tlyear">${it.year || ''}</div>` +
+        `<div class="tlbtns"><button class="tlplayall">▶ Play all</button>` +
+        `<button class="tlqueue">+ Queue</button><button class="tlclosebtn">Close</button></div></div>` +
+        `<div class="tlright"><div class="tlstate">loading tracklist…</div></div>`;
+    endOfRow(card).after(panel);
+    tlEl = panel;
+    panel.querySelector('.tlclosebtn')!.addEventListener('click', closeTracklist);
+    panel.querySelector('.tlplayall')!.addEventListener('click', () => { play(it, 0); });
+    panel.querySelector('.tlqueue')!.addEventListener('click', async (e) => {
+        const b = e.target as HTMLElement; b.textContent = 'adding…';
+        const r = await ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
+        b.textContent = r && r.ok ? 'added ✓' : 'failed';
+    });
+
+    const res: { ok: boolean; year?: number; tracks?: { id: string; title: string; artist: string; duration: number }[] } =
+        await ipcRenderer.invoke('collection:tracklist', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
+    if (tlEl !== panel) return; // collapsed while loading
+    if (res.year && res.year !== it.year) { it.year = res.year; (panel.querySelector('.tlyear') as HTMLElement).textContent = String(res.year); scheduleRender(); }
+    const right = panel.querySelector('.tlright') as HTMLElement;
+    if (!res.ok || !res.tracks || !res.tracks.length) { right.innerHTML = `<div class="tlstate">couldn't load the tracklist</div>`; return; }
+    right.innerHTML = '';
+    res.tracks.forEach((t, i) => {
+        const row = document.createElement('div');
+        row.className = 'tlrow';
+        row.innerHTML =
+            `<span class="tlnum">${i + 1}</span>` +
+            `<span class="tltrk">${escapeHtml(t.title)}</span>` +
+            `<span class="tldur">${fmtDur(t.duration)}</span>`;
+        row.addEventListener('click', () => play(it, i));
+        right.appendChild(row);
+    });
 }
 
 // --- download menu ----------------------------------------------------------
@@ -171,15 +238,38 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
     positionMenu(menu, anchor); // re-clamp now that the real height is known
 }
 document.addEventListener('click', () => closeMenu());
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); closeTracklist(); } });
+
+// --- release-year enrichment ------------------------------------------------
+// bandcamp's collection api omits release years, so they arrive as 0. when the
+// user sorts by year we resolve them in the background (main caches to disk).
+let yearsRequested = false;
+let renderTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRender(): void {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => { renderTimer = null; if (items.length) render(); }, 300);
+}
+function requestYears(): void {
+    if (yearsRequested || !items.length) return;
+    yearsRequested = true;
+    const need = items.filter((i) => !i.year).map((i) => ({ tralbumId: i.tralbumId, tralbumType: i.tralbumType, bandId: i.bandId }));
+    if (need.length) ipcRenderer.send('collection:enrich-years', need);
+}
+ipcRenderer.on('collection:years', (_e, updates: { tralbumId: string; year: number }[]) => {
+    const byId = new Map(updates.map((u) => [u.tralbumId, u.year]));
+    for (const it of items) { const y = byId.get(it.tralbumId); if (y) it.year = y; }
+    scheduleRender();
+});
+ipcRenderer.on('collection:years-done', () => scheduleRender());
 
 searchEl.addEventListener('input', () => { if (items.length) render(); });
-sortEl.addEventListener('change', () => { if (items.length) render(); });
+sortEl.addEventListener('change', () => { if (sortEl.value === 'year') requestYears(); if (items.length) render(); });
 dirBtn.addEventListener('click', () => {
     descending = !descending;
     dirBtn.textContent = descending ? '↓' : '↑';
     if (items.length) render();
 });
-$('refresh').addEventListener('click', () => { items = []; load(); });
+$('refresh').addEventListener('click', () => { items = []; yearsRequested = false; load(); });
 $('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
 
 // load on first open, and retry if previous open failed to fill it

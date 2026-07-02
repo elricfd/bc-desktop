@@ -31,6 +31,55 @@ class BandcampApi {
     // cache full tracklists by `${type}:${tralbumId}` and track -> album map by track id. both expire after cache ttl ms.
     tralbumCache = new Map();
     albumOfTrack = new Map();
+    // release year by `${type}:${id}` (bandcamp's collection api omits release dates, so we read them from the tralbum endpoint on demand)
+    yearCache = new Map();
+    // pull the release *year* out of a tralbum payload (string date or unix ts)
+    extractYear(data) {
+        if (!data || typeof data !== 'object')
+            return 0;
+        const cur = data.current || {};
+        const raw = data.release_date ?? cur.release_date ?? data.publish_date ?? cur.publish_date;
+        if (raw == null || raw === '')
+            return 0;
+        let d = null;
+        if (typeof raw === 'number')
+            d = new Date(raw > 1e12 ? raw : raw * 1000);
+        else {
+            const t = Date.parse(String(raw));
+            if (!isNaN(t))
+                d = new Date(t);
+        }
+        const y = d ? d.getFullYear() : Number(String(raw).match(/\b(19|20)\d{2}\b/)?.[0] || 0);
+        return y > 1900 && y < 3000 ? y : 0;
+    }
+    /** release year for a (type,id), fetched (and cached) from the tralbum endpoint. 0 if unknown. */
+    async fetchReleaseYear(q) {
+        const id = toId(q.tralbumId);
+        if (!id)
+            return 0;
+        const key = `${q.tralbumType}:${id}`;
+        if (this.yearCache.has(key))
+            return this.yearCache.get(key);
+        const types = q.tralbumType === 't' ? ['t', 'a'] : ['a', 't'];
+        for (const type of types) {
+            const data = await this.fetchRaw(type, id, q.bandId);
+            if (!data)
+                continue;
+            const y = this.extractYear(data);
+            this.yearCache.set(`${type}:${id}`, y);
+            if (y)
+                return y;
+        }
+        return this.yearCache.get(key) || 0;
+    }
+    /** seed the year cache (e.g. from a persisted store) so we don't refetch across sessions. */
+    primeYear(type, id, year) {
+        if (id && year)
+            this.yearCache.set(`${type}:${toId(id)}`, year);
+    }
+    getReleaseYear(type, id) {
+        return this.yearCache.get(`${type}:${toId(id)}`) || 0;
+    }
     cacheGet(key) {
         const entry = this.tralbumCache.get(key);
         if (!entry)
@@ -50,7 +99,10 @@ class BandcampApi {
             u.searchParams.set('tralbum_id', tralbumId);
             u.searchParams.set('tralbum_type', type);
         }
-        return [mobile.toString(), info.toString()];
+        // web (info) endpoint first: its `artist` is the release's own artist (e.g. a
+        // side-project on a label's page), whereas mobile's tralbum_artist is the band
+        // — using mobile first showed the band name instead of the release artist.
+        return [info.toString(), mobile.toString()];
     }
     /** fetch raw tralbum payload for single (type, id) used to read parent album id of track before fetching full album. */
     async fetchRaw(type, tralbumId, bandId) {
@@ -91,6 +143,11 @@ class BandcampApi {
                 const realId = toId((data && (data.id ?? data.tralbum_id)) || q.tralbumId);
                 if (realId)
                     this.tralbumCache.set(`${type}:${realId}`, { tracks, at });
+                // cache the release year while we have the payload
+                const yr = this.extractYear(data);
+                this.yearCache.set(primaryKey, yr);
+                if (realId)
+                    this.yearCache.set(`${type}:${realId}`, yr);
                 return tracks;
             }
         }
@@ -216,10 +273,11 @@ class BandcampApi {
         const bandId = toId(data.band_id ?? data.selling_band_id ?? q.bandId);
         const tralbumId = toId(data.id ?? data.tralbum_id ?? q.tralbumId);
         const tralbumType = (data.item_type || data.tralbum_type || q.tralbumType) === 't' ? 't' : 'a';
-        // the mobile tralbum endpoint (tried first) names the artist tralbum_artist /
-        // band.name, not artist/band_name — cover all of them or the collection view's
-        // player shows a blank artist
-        const artist = (data.tralbum_artist || data.artist || current.artist ||
+        // prefer the release's own artist (current.artist / artist) over the band /
+        // tralbum_artist so a side-project or various-artists release shows its real
+        // artist, not the page/label name. tralbum_artist/band.name are fallbacks for
+        // the mobile endpoint shape.
+        const artist = (current.artist || data.artist || data.tralbum_artist ||
             data.band_name || (data.band && data.band.name) || 'Bandcamp').toString().trim();
         const album = (data.album_title || current.title || data.title || '').toString().trim();
         const artId = toId(data.art_id ?? current.art_id);
@@ -257,10 +315,12 @@ class BandcampApi {
         const type = (it.item_type === 'track' || it.tralbum_type === 't') ? 't' : 'a';
         const artId = toId(it.item_art_id ?? it.art_id);
         const added = Date.parse(it.purchased || it.added || it.date_added || '') || 0;
+        // release year: bandcamp's collection api usually omits it, so this is often 0
+        // and gets filled in later by fetchReleaseYear (see collection:enrich-years).
+        // deliberately NOT falling back to the added date — that made "sort by year"
+        // behave like "sort by date added".
         const rel = it.release_date || it.releaseDate || '';
-        let year = Number(String(rel).match(/\d{4}/)?.[0]) || 0;
-        if (!year && added)
-            year = new Date(added).getFullYear();
+        const year = Number(String(rel).match(/\b(19|20)\d{2}\b/)?.[0]) || 0;
         // redownload key is sale_item_type + sale_item_id, e.g. c173525240
         const saleKey = (it.sale_item_type || '') + toId(it.sale_item_id);
         return {

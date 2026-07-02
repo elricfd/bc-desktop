@@ -89,6 +89,7 @@
     <div class="section">
         <h2>General</h2>
         <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="lightMode"> light theme (bandcamp's native look)</label>
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
         <label style="margin-top:0;">Download location</label>
         <div class="row" style="gap:8px;margin-top:2px;">
@@ -129,6 +130,7 @@
             $('discordEnabled').checked = s.discordEnabled !== false;
             $('discordClientId').value = s.discordClientId || '';
             $('closeToTray').checked = s.closeToTray !== false;
+            $('lightMode').checked = s.theme === 'light';
             $('downloadDir').value = s.downloadDir || '';
             if (lfm.username) { $('lfmUser').textContent = 'connected: ' + lfm.username; $('lfmUser').className = 'status ok'; }
         }
@@ -139,7 +141,8 @@
                 lastfm: { apiKey: $('apiKey').value.trim(), apiSecret: $('apiSecret').value.trim(), enabled: $('lfmEnabled').checked },
                 discordEnabled: $('discordEnabled').checked,
                 discordClientId: $('discordClientId').value.trim(),
-                closeToTray: $('closeToTray').checked
+                closeToTray: $('closeToTray').checked,
+                theme: $('lightMode').checked ? 'light' : 'dark'
             });
         }
 

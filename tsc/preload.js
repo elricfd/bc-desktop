@@ -1,18 +1,27 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
-// dark cloak hiding bandcamp own audio bars (our player is only transport)
+// anti-flash + hide bandcamp's own audio bars (our player is the only transport).
+// in DARK mode we cloak the body until darkreader paints (avoids a white flash);
+// in LIGHT mode we must NOT do that (darkreader never runs, so the body would stay
+// hidden and the whole page shows blank grey). theme is read synchronously so the
+// right cloak applies at document-start.
+let bcTheme = 'dark';
+try {
+    bcTheme = electron_1.ipcRenderer.sendSync('app:get-theme') || 'dark';
+}
+catch (e) { /* default dark */ }
 const antiFlashStyle = document.createElement('style');
-antiFlashStyle.textContent = `
-    html { background-color: #181a1b !important; }
-    html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }
-    #collection-player, .inline_player,
-    .floating-player, .floating-player.has-track { display: none !important; }
-`;
-if (document.head)
-    document.head.appendChild(antiFlashStyle);
+antiFlashStyle.textContent = (bcTheme === 'light'
+    ? ''
+    : `html { background-color: #181a1b !important; }
+       html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }`)
+    + `\n#collection-player, .inline_player, .floating-player { display: none !important; }`;
+const antiFlashRoot = document.head || document.documentElement;
+if (antiFlashRoot)
+    antiFlashRoot.appendChild(antiFlashStyle);
 else
-    document.addEventListener("DOMContentLoaded", () => document.head.appendChild(antiFlashStyle));
+    document.addEventListener('DOMContentLoaded', () => (document.head || document.documentElement).appendChild(antiFlashStyle));
 // mirror discover grid (/api/discover/1/discover_web) into window.__bcrpc.discover so extractor resolves genre page play to full album w/out track -> album lookup. injected as main world script at document start (csp stripped) before page grabs fetch. passive read of resp clone
 const CAPTURE_SRC = `
 (function () {

@@ -85,8 +85,12 @@ export class PresenceService {
         const start = now - Math.floor((track.position || 0) * 1000);
         const end = track.duration > 0 ? start + Math.floor(track.duration * 1000) : undefined;
 
+        // the activity name is the line discord shows compactly. use "🎵 artist - song".
+        // (discord always prefixes the *type* verb, e.g. "Listening to", which can't be
+        // removed via rpc — the name carries the requested text.)
+        const label = (track.artist ? `${track.artist} - ${track.title}` : track.title).slice(0, 120);
         const activity: any = {
-            name: 'Bandcamp',
+            name: `🎵 ${label}`,
             type: 2, // listening
             details: track.title.slice(0, 128),
             state: (track.artist ? `by ${track.artist}` : 'Bandcamp').slice(0, 128),
@@ -98,6 +102,8 @@ export class PresenceService {
             instance: false,
         };
         if (end) activity.endTimestamp = end;
+        // discord only supports clickable *buttons* (not clickable title/cover/artist),
+        // so this button is the link to the release.
         if (track.url?.startsWith('https://')) {
             activity.buttons = [{ label: 'Listen on Bandcamp', url: track.url }];
         }
@@ -111,9 +117,10 @@ export class PresenceService {
             this.log('setActivity failed, retrying text-only: ' + (err && (err.message || err)));
             try {
                 await this.client.user?.setActivity({
-                    name: 'Bandcamp', type: 2, instance: false,
+                    name: activity.name, type: 2, instance: false,
                     details: activity.details, state: activity.state,
                     startTimestamp: activity.startTimestamp, endTimestamp: activity.endTimestamp,
+                    buttons: activity.buttons,
                 });
                 this.log('setActivity ok (text-only)');
             } catch (err2: any) {

@@ -57,7 +57,18 @@ const SEARCHBOX_CSS = `
         padding-right: 28px !important;
     }
 `;
-// pre-theme / anti-flash css, swapped per navigation so pages don't flash white
+// light theme: keep bandcamp's own look, just hide scrollbars & the banner. no
+// opacity cloak (that waits on darkreader, which is off in light mode).
+const LIGHT_CSS = `
+    * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+    ::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
+    .editorial-recommendations-banner { display: none !important; }
+    body.home .editorial-recommendations-banner { display: block !important; }
+`;
+// per-navigation theme css. the html-bg / body-opacity cloak is intentionally
+// injected here too (webContents-level, applies very early per navigation) AND in
+// the preload — dropping either one lets a flash of light-mode bandcamp show on
+// page change, so both are kept on purpose.
 const ANTI_FLASH_CSS = `
     html { background-color: #181a1b !important; }
     html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }
@@ -232,6 +243,19 @@ function isSocialHost(url) {
     catch {
         return false;
     }
+}
+function toIdStr(v) { const m = String(v ?? '').match(/\d+/); return m ? m[0] : ''; }
+// ui theme: 'dark' (darkreader) default, or 'light' (bandcamp's native look)
+function getTheme() {
+    return store.get('theme', 'dark') === 'light' ? 'light' : 'dark';
+}
+// persist a resolved release year so year-sort enrichment is a one-time cost
+function persistYear(type, id, year) {
+    if (!id || !year)
+        return;
+    const c = store.get('yearCache', {});
+    c[type + ':' + id] = year;
+    store.set('yearCache', c);
 }
 // where purchased downloads land: user pick if set, else os downloads folder
 function getDownloadDir() {
@@ -421,7 +445,7 @@ async function init() {
                         const a = data && data.queue && data.queue[data.activeIndex || 0];
                         console.log('[bcrpc] extract ' + (stale ? '(stale, dropped) ' : '') + (data && data.queue
                             ? data.context + ' n=' + data.queue.length + ' active=' + data.activeIndex +
-                                ' title=' + (a && a.title) + ' srcLen=' + ((a && a.src) || '').length
+                                ' title=' + (a && a.title) + ' artist=' + (a && a.artist) + ' album=' + (a && a.album) + ' srcLen=' + ((a && a.src) || '').length
                             : 'EMPTY'));
                     }
                     if (stale)
@@ -458,7 +482,18 @@ async function init() {
             return;
         }
         const headers = { ...details.requestHeaders };
-        if (details.url.includes('bandcamp.com') || details.url.includes('bcbits.com') || details.url.includes('sndcdn')) {
+        // spoof referer/origin for the media CDNs (they gate on a bandcamp referer)
+        // and for the BASE bandcamp.com domain (its apis — tralbum/fancollection —
+        // want it). but NOT for artist subdomains: forcing Origin=bandcamp.com on a
+        // subdomain action (e.g. c418.bandcamp.com/collect_item_cb) makes bandcamp
+        // reject it ("request must use the base domain").
+        let host = '';
+        try {
+            host = new URL(details.url).hostname.toLowerCase();
+        }
+        catch { /* leave blank */ }
+        const isBaseBandcamp = host === 'bandcamp.com' || host === 'www.bandcamp.com';
+        if (isBaseBandcamp || host.endsWith('bcbits.com') || host.includes('sndcdn')) {
             headers['Referer'] = 'https://bandcamp.com/';
             headers['Origin'] = 'https://bandcamp.com';
         }
@@ -593,9 +628,18 @@ async function init() {
                 bandId: req.bandId,
             });
             if (tracks.length && playerView && !playerView.webContents.isDestroyed()) {
+                // start at the chosen track (by id, else index) so the whole album
+                // becomes the queue with the rest of it queued behind
+                let active = typeof req.activeIndex === 'number' ? req.activeIndex : 0;
+                if (req.trackId) {
+                    const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId));
+                    if (i !== -1)
+                        active = i;
+                }
+                active = Math.max(0, Math.min(active, tracks.length - 1));
                 trapSeq++; // supersede any in flight page trap
                 playerView.webContents.send('player:stream-incoming', {
-                    queue: tracks, activeIndex: 0, context: 'collection', format: 'raw',
+                    queue: tracks, activeIndex: active, context: 'collection', format: 'raw',
                 });
                 return { ok: true };
             }
@@ -604,6 +648,78 @@ async function init() {
         catch (err) {
             return { ok: false, error: err?.message || 'play failed' };
         }
+    });
+    // fetch a release's tracklist (+ resolved release year) for the collection view
+    electron_1.ipcMain.handle('collection:tracklist', async (_e, req) => {
+        try {
+            const tracks = await bandcampApi.fetchTralbum({ tralbumId: req.tralbumId, tralbumType: req.tralbumType, bandId: req.bandId });
+            if (!tracks.length)
+                return { ok: false, error: 'no tracks' };
+            const year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req);
+            if (year)
+                persistYear(req.tralbumType, req.tralbumId, year);
+            const first = tracks[0];
+            return {
+                ok: true, year,
+                title: (first.album || first.title || '').toString(),
+                artist: first.artist, art: first.art,
+                tracks: tracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, duration: t.duration })),
+            };
+        }
+        catch (err) {
+            return { ok: false, error: err?.message || 'tracklist failed' };
+        }
+    });
+    // fill in real release years for the collection (bandcamp's collection api omits
+    // them). cached to disk so it's a one-time cost. streams results back as they land.
+    electron_1.ipcMain.on('collection:enrich-years', async (_e, reqs) => {
+        if (!Array.isArray(reqs) || !reqs.length)
+            return;
+        const store2 = store.get('yearCache', {});
+        const send = (updates) => {
+            if (updates.length && collectionView && !collectionView.webContents.isDestroyed()) {
+                collectionView.webContents.send('collection:years', updates);
+            }
+        };
+        const cached = [];
+        const todo = [];
+        for (const r of reqs) {
+            const k = r.tralbumType + ':' + r.tralbumId;
+            // only treat a real (non-zero) year as cached; 0 usually means a prior
+            // fetch was throttled, so retry those rather than caching the failure
+            if (store2[k]) {
+                cached.push({ tralbumId: r.tralbumId, year: store2[k] });
+                bandcampApi.primeYear(r.tralbumType, r.tralbumId, store2[k]);
+            }
+            else
+                todo.push(r);
+        }
+        send(cached);
+        let idx = 0;
+        const pending = [];
+        const worker = async () => {
+            while (idx < todo.length) {
+                const r = todo[idx++];
+                let y = 0;
+                try {
+                    y = await bandcampApi.fetchReleaseYear(r);
+                }
+                catch { /* skip */ }
+                if (y) {
+                    store2[r.tralbumType + ':' + r.tralbumId] = y;
+                    pending.push({ tralbumId: r.tralbumId, year: y });
+                }
+                if (pending.length >= 25) {
+                    send(pending.splice(0));
+                    store.set('yearCache', store2);
+                }
+            }
+        };
+        await Promise.all([worker(), worker(), worker()]); // modest concurrency to avoid 429s
+        send(pending.splice(0));
+        store.set('yearCache', store2);
+        if (collectionView && !collectionView.webContents.isDestroyed())
+            collectionView.webContents.send('collection:years-done');
     });
     // add a release chosen in the custom collection view to the queue (no interrupt)
     electron_1.ipcMain.handle('collection:enqueue', async (_e, req) => {
@@ -743,6 +859,9 @@ async function init() {
     electron_1.ipcMain.on('app:settings', () => openSettings());
     electron_1.ipcMain.on('settings:close', () => { if (settingsWindow && !settingsWindow.isDestroyed())
         settingsWindow.close(); });
+    // preload reads the theme synchronously at document-start so its anti-flash
+    // cloak matches (no opacity cloak in light mode, else the page stays blank grey)
+    electron_1.ipcMain.on('app:get-theme', (e) => { e.returnValue = getTheme(); });
     // let the user pick where purchased downloads are saved
     electron_1.ipcMain.handle('settings:choose-download-dir', async () => {
         const res = await electron_1.dialog.showOpenDialog(settingsWindow || mainWindow, {
@@ -767,6 +886,7 @@ async function init() {
             discordClientId: store.get('discordClientId', ''),
             closeToTray: store.get('closeToTray', true),
             downloadDir: getDownloadDir(),
+            theme: getTheme(),
         };
     });
     electron_1.ipcMain.handle('settings:save', (_e, data) => {
@@ -780,6 +900,15 @@ async function init() {
             if (typeof data.discordClientId === 'string') {
                 store.set('discordClientId', data.discordClientId.trim());
                 presenceService.reconnect(); // apply new app id now
+            }
+            if (typeof data.theme === 'string') {
+                const next = data.theme === 'light' ? 'light' : 'dark';
+                const changed = next !== getTheme();
+                store.set('theme', next);
+                // reload every tab so the cloak/darkreader state flips
+                if (changed)
+                    tabs.forEach((t) => { if (!t.view.webContents.isDestroyed())
+                        t.view.webContents.reload(); });
             }
             if (devMode)
                 console.log('[bcrpc] settings:save ok keys=' + JSON.stringify(Object.keys(data || {})));
@@ -906,6 +1035,8 @@ async function init() {
         wc.on('dom-ready', async () => {
             try {
                 await wc.insertCSS(SEARCHBOX_CSS);
+                if (getTheme() === 'light')
+                    return; // no darkreader in light mode
                 await wc.executeJavaScript(`
                     (function() {
                         if (window.__darkReaderActive) return;
@@ -930,13 +1061,13 @@ async function init() {
                 console.error('Failed to inject view assets:', err);
             }
         });
-        // pre-theme anti-flash css, swapped per navigation
+        // pre-theme css, swapped per navigation (light mode skips the dark cloak)
         wc.on('did-navigate', async () => {
             try {
                 const prev = antiFlashKeys.get(wc);
                 if (prev)
                     await wc.removeInsertedCSS(prev).catch(() => { });
-                const key = await wc.insertCSS(ANTI_FLASH_CSS, { cssOrigin: 'user' });
+                const key = await wc.insertCSS(getTheme() === 'light' ? LIGHT_CSS : ANTI_FLASH_CSS, { cssOrigin: 'user' });
                 antiFlashKeys.set(wc, key);
             }
             catch (err) {
