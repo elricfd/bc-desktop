@@ -26,6 +26,12 @@
             background: #121415; border: 1px solid var(--line); border-radius: 6px;
             color: var(--text); padding: 7px 10px; font-size: 12px; font-family: inherit; outline: none;
         }
+        /* custom chevron so it isn't jammed against the right edge */
+        select {
+            -webkit-appearance: none; appearance: none; padding-right: 30px;
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" fill="none" stroke="%239a968e" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+            background-repeat: no-repeat; background-position: right 11px center;
+        }
         input[type="text"]:focus, select:focus { border-color: var(--accent); }
         #search { width: 220px; }
         .tbtn {
