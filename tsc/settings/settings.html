@@ -90,6 +90,7 @@
         <h2>General</h2>
         <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
         <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="lightMode"> light theme (bandcamp's native look)</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="darkArtistPages"> apply dark theme to artist pages (off keeps their custom themes)</label>
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
         <label style="margin-top:0;">Download location</label>
         <div class="row" style="gap:8px;margin-top:2px;">
@@ -131,6 +132,7 @@
             $('discordClientId').value = s.discordClientId || '';
             $('closeToTray').checked = s.closeToTray !== false;
             $('lightMode').checked = s.theme === 'light';
+            $('darkArtistPages').checked = s.darkArtistPages !== false;
             $('downloadDir').value = s.downloadDir || '';
             if (lfm.username) { $('lfmUser').textContent = 'connected: ' + lfm.username; $('lfmUser').className = 'status ok'; }
         }
@@ -142,7 +144,8 @@
                 discordEnabled: $('discordEnabled').checked,
                 discordClientId: $('discordClientId').value.trim(),
                 closeToTray: $('closeToTray').checked,
-                theme: $('lightMode').checked ? 'light' : 'dark'
+                theme: $('lightMode').checked ? 'light' : 'dark',
+                darkArtistPages: $('darkArtistPages').checked
             });
         }
 

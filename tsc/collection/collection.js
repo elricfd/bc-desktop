@@ -1,7 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
-// prove view actually booted (shows in --dev terminal)
 electron_1.ipcRenderer.send('collection:log', 'booted');
 const $ = (id) => document.getElementById(id);
 const grid = $('grid');
@@ -12,21 +11,21 @@ const countEl = $('count');
 let items = [];
 let loading = false;
 let descending = true;
+let expected = 0;
+let currentlyRenderedCount = 0;
 function setState(msg) {
     grid.innerHTML = `<div class="state">${msg}</div>`;
 }
 function escapeHtml(s) {
     return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
-let expected = 0; // total collection size reported by the backend (for the count label)
-// pull the collection from main, rendering each page as it streams in so a big
-// collection paints almost immediately instead of blocking on the full fetch
 async function load() {
     if (loading || items.length)
         return;
     loading = true;
     items = [];
     expected = 0;
+    currentlyRenderedCount = 0;
     setState('loading your collection…');
     electron_1.ipcRenderer.send('collection:log', 'fetch start');
     const onItems = (_e, p) => {
@@ -34,7 +33,8 @@ async function load() {
             items.push(...p.items);
         if (p?.total)
             expected = p.total;
-        render();
+        // CRITICAL: Soft render. Only append new items to avoid destroying the open tracklist.
+        softRender();
     };
     electron_1.ipcRenderer.on('collection:items', onItems);
     try {
@@ -58,10 +58,9 @@ async function load() {
         electron_1.ipcRenderer.removeListener('collection:items', onItems);
         loading = false;
         if (items.length)
-            render(); // final paint drops the "loading…" suffix
+            updateHeaderCount();
     }
 }
-// current view = search filter + chosen sort + direction
 function sortedFiltered() {
     const q = searchEl.value.trim().toLowerCase();
     const key = sortEl.value;
@@ -82,69 +81,92 @@ function sortedFiltered() {
         out.reverse();
     return out;
 }
-function render() {
+function updateHeaderCount() {
     const list = sortedFiltered();
     const total = list.length === items.length ? '' : ' / ' + items.length;
     const progress = loading ? ` — loading… ${expected ? items.length + ' / ' + expected : items.length}` : '';
     countEl.textContent = list.length + total + ' releases' + progress;
+}
+// Generates a single DOM node for an album card
+function createCard(it) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.id = `card-${it.tralbumType}${it.tralbumId}`;
+    const wrap = document.createElement('div');
+    wrap.className = 'artwrap';
+    wrap.innerHTML = `<img class="art" loading="lazy" src="${it.art}">`;
+    const enq = document.createElement('button');
+    enq.className = 'enq';
+    enq.title = 'add to queue';
+    enq.textContent = '+';
+    enq.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const prev = enq.textContent;
+        const res = await electron_1.ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
+        enq.textContent = res && res.ok ? '✓' : '×';
+        setTimeout(() => { enq.textContent = prev; }, 900);
+    });
+    wrap.appendChild(enq);
+    if (it.downloadUrl) {
+        const dl = document.createElement('button');
+        dl.className = 'dl';
+        dl.title = 'download';
+        dl.textContent = '⤓';
+        dl.addEventListener('click', (e) => { e.stopPropagation(); openDownloadMenu(it, dl); });
+        wrap.appendChild(dl);
+    }
+    card.appendChild(wrap);
+    const meta = document.createElement('div');
+    meta.innerHTML =
+        `<div class="t">${escapeHtml(it.title)}</div>` +
+            `<div class="a">${escapeHtml(it.artist)}</div>` +
+            `<div class="y">${it.year || ''}</div>`;
+    card.appendChild(meta);
+    card.addEventListener('click', () => toggleTracklist(it, card));
+    return card;
+}
+// CRITICAL FIX: Only appends new items during load so the open tracklist isn't destroyed
+function softRender() {
+    const list = sortedFiltered();
+    updateHeaderCount();
     if (!list.length) {
         if (!loading)
             setState('nothing matches your search.');
         return;
     }
-    grid.innerHTML = ''; // drops any open inline tracklist
-    tlEl = null;
-    openId = '';
-    const frag = document.createDocumentFragment();
-    for (const it of list) {
-        const card = document.createElement('div');
-        card.className = 'card';
-        const wrap = document.createElement('div');
-        wrap.className = 'artwrap';
-        wrap.innerHTML = `<img class="art" loading="lazy" src="${it.art}">`;
-        // add-to-queue button (every item)
-        const enq = document.createElement('button');
-        enq.className = 'enq';
-        enq.title = 'add to queue';
-        enq.textContent = '+';
-        enq.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const prev = enq.textContent;
-            const res = await electron_1.ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
-            enq.textContent = res && res.ok ? '✓' : '×';
-            setTimeout(() => { enq.textContent = prev; }, 900);
-        });
-        wrap.appendChild(enq);
-        // owned items get a small download button that expands into a format menu
-        if (it.downloadUrl) {
-            const dl = document.createElement('button');
-            dl.className = 'dl';
-            dl.title = 'download';
-            dl.textContent = '⤓';
-            dl.addEventListener('click', (e) => { e.stopPropagation(); openDownloadMenu(it, dl); });
-            wrap.appendChild(dl);
+    // If we are applying a search/sort filter, or it's the very first chunk, we MUST wipe the grid.
+    if (currentlyRenderedCount === 0 || searchEl.value.trim() !== '' || sortEl.value !== 'added') {
+        grid.innerHTML = '';
+        tlEl = null;
+        openId = '';
+        const frag = document.createDocumentFragment();
+        for (const it of list) {
+            frag.appendChild(createCard(it));
         }
-        card.appendChild(wrap);
-        const meta = document.createElement('div');
-        meta.innerHTML =
-            `<div class="t">${escapeHtml(it.title)}</div>` +
-                `<div class="a">${escapeHtml(it.artist)}</div>` +
-                `<div class="y">${it.year || ''}</div>`;
-        card.appendChild(meta);
-        // clicking a cover expands its tracklist inline (rather than auto-playing)
-        card.addEventListener('click', () => toggleTracklist(it, card));
-        frag.appendChild(card);
+        grid.appendChild(frag);
+        currentlyRenderedCount = list.length;
     }
-    grid.appendChild(frag);
+    else {
+        // We are streaming in base data without filters. Only append the NEW items to the bottom.
+        const newItems = list.slice(currentlyRenderedCount);
+        if (newItems.length > 0) {
+            const frag = document.createDocumentFragment();
+            for (const it of newItems) {
+                frag.appendChild(createCard(it));
+            }
+            grid.appendChild(frag);
+            currentlyRenderedCount = list.length;
+        }
+    }
 }
-// play a release, optionally starting at a chosen track index (queue becomes the
-// whole album; the rest queues behind the chosen track)
+// Hard reset the grid (used when user actually types in search or changes sort dropdown)
+function forceRender() {
+    currentlyRenderedCount = 0;
+    softRender();
+}
 async function play(it, activeIndex = 0) {
     await electron_1.ipcRenderer.invoke('collection:play', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, activeIndex });
 }
-// --- inline tracklist -------------------------------------------------------
-// clicking a cover expands a full-width panel inline after that release's row; the
-// grid still scrolls normally and clicking the cover again collapses it.
 let tlEl = null;
 let openId = '';
 function closeTracklist() { if (tlEl) {
@@ -152,8 +174,6 @@ function closeTracklist() { if (tlEl) {
     tlEl = null;
 } openId = ''; }
 const fmtDur = (s) => (!s || s < 0 ? '' : `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`);
-// the last card element on the same visual row as `card` (so the panel drops below
-// the whole row, not mid-row) regardless of how many columns are showing
 function endOfRow(card) {
     const cards = Array.from(grid.querySelectorAll('.card'));
     const top = card.offsetTop;
@@ -171,7 +191,7 @@ async function toggleTracklist(it, card) {
     const wasOpen = openId === id && !!tlEl;
     closeTracklist();
     if (wasOpen)
-        return; // second click on the same release closes it
+        return;
     openId = id;
     const panel = document.createElement('div');
     panel.className = 'tlinline';
@@ -196,11 +216,10 @@ async function toggleTracklist(it, card) {
     });
     const res = await electron_1.ipcRenderer.invoke('collection:tracklist', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
     if (tlEl !== panel)
-        return; // collapsed while loading
+        return;
     if (res.year && res.year !== it.year) {
         it.year = res.year;
         panel.querySelector('.tlyear').textContent = String(res.year);
-        scheduleRender();
     }
     const right = panel.querySelector('.tlright');
     if (!res.ok || !res.tracks || !res.tracks.length) {
@@ -219,14 +238,11 @@ async function toggleTracklist(it, card) {
         right.appendChild(row);
     });
 }
-// --- download menu ----------------------------------------------------------
 let menuEl = null;
 function closeMenu() { if (menuEl) {
     menuEl.remove();
     menuEl = null;
 } }
-// pin the menu to the anchor, flipping upward when there's no room below so a card
-// near the bottom of the grid doesn't get its menu clipped / pushed off screen
 function positionMenu(menu, anchor) {
     const r = anchor.getBoundingClientRect();
     menu.style.left = Math.max(6, Math.min(r.left, window.innerWidth - 196)) + 'px';
@@ -245,7 +261,7 @@ async function openDownloadMenu(it, anchor) {
     positionMenu(menu, anchor);
     const res = await electron_1.ipcRenderer.invoke('download:formats', it.downloadUrl);
     if (menuEl !== menu)
-        return; // closed while loading
+        return;
     if (!res.ok || !res.formats.length) {
         menu.textContent = 'no downloads available';
         return;
@@ -264,24 +280,14 @@ async function openDownloadMenu(it, anchor) {
         });
         menu.appendChild(b);
     }
-    positionMenu(menu, anchor); // re-clamp now that the real height is known
+    positionMenu(menu, anchor);
 }
 document.addEventListener('click', () => closeMenu());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') {
     closeMenu();
     closeTracklist();
 } });
-// --- release-year enrichment ------------------------------------------------
-// bandcamp's collection api omits release years, so they arrive as 0. when the
-// user sorts by year we resolve them in the background (main caches to disk).
 let yearsRequested = false;
-let renderTimer = null;
-function scheduleRender() {
-    if (renderTimer)
-        return;
-    renderTimer = setTimeout(() => { renderTimer = null; if (items.length)
-        render(); }, 300);
-}
 function requestYears() {
     if (yearsRequested || !items.length)
         return;
@@ -294,26 +300,27 @@ electron_1.ipcRenderer.on('collection:years', (_e, updates) => {
     const byId = new Map(updates.map((u) => [u.tralbumId, u.year]));
     for (const it of items) {
         const y = byId.get(it.tralbumId);
-        if (y)
+        if (y) {
             it.year = y;
+            const cardEl = document.getElementById(`card-${it.tralbumType}${it.tralbumId}`);
+            if (cardEl) {
+                const yearLabel = cardEl.querySelector('.y');
+                if (yearLabel)
+                    yearLabel.textContent = String(y);
+            }
+        }
     }
-    scheduleRender();
 });
-electron_1.ipcRenderer.on('collection:years-done', () => scheduleRender());
-searchEl.addEventListener('input', () => { if (items.length)
-    render(); });
+searchEl.addEventListener('input', forceRender);
 sortEl.addEventListener('change', () => { if (sortEl.value === 'year')
-    requestYears(); if (items.length)
-    render(); });
+    requestYears(); forceRender(); });
 dirBtn.addEventListener('click', () => {
     descending = !descending;
     dirBtn.textContent = descending ? '↓' : '↑';
-    if (items.length)
-        render();
+    forceRender();
 });
 $('refresh').addEventListener('click', () => { items = []; yearsRequested = false; load(); });
 $('close').addEventListener('click', () => electron_1.ipcRenderer.send('collection:close'));
-// load on first open, and retry if previous open failed to fill it
 electron_1.ipcRenderer.on('collection:load', () => load());
 electron_1.ipcRenderer.on('collection:shown', () => { if (!items.length)
     load(); });

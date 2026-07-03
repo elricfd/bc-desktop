@@ -103,19 +103,26 @@ export class BandcampApi {
         return [info.toString(), mobile.toString()];
     }
 
+    /** GET one endpoint & return its json object (or null). */
+    private async fetchRawFrom(url: string): Promise<any | null> {
+        const session = this.getSession();
+        if (!session) return null;
+        try {
+            const res = await session.fetch(url, { credentials: 'include' } as any);
+            if (!res.ok) return null;
+            const data: any = await res.json();
+            return data && typeof data === 'object' ? data : null;
+        } catch {
+            return null;
+        }
+    }
+
     /** fetch raw tralbum payload for single (type, id) used to read parent album id of track before fetching full album. */
     private async fetchRaw(type: TralbumType, tralbumId: string, bandId?: string): Promise<any | null> {
-        const session = this.getSession();
-        if (!session || !tralbumId) return null;
+        if (!tralbumId) return null;
         for (const url of this.attemptUrls(type, tralbumId, bandId)) {
-            try {
-                const res = await session.fetch(url, { credentials: 'include' } as any);
-                if (!res.ok) continue;
-                const data: any = await res.json();
-                if (data && typeof data === 'object') return data;
-            } catch {
-                // try next endpoint
-            }
+            const data = await this.fetchRawFrom(url);
+            if (data) return data;
         }
         return null;
     }
@@ -129,9 +136,15 @@ export class BandcampApi {
 
         const types: TralbumType[] = q.tralbumType === 't' ? ['t', 'a'] : ['a', 't'];
         for (const type of types) {
-            const data = await this.fetchRaw(type, q.tralbumId, q.bandId);
-            const tracks = this.normalize(data, { ...q, tralbumType: type });
-            if (tracks.length) {
+            // try EACH endpoint (web then mobile) and use the first that yields
+            // tracks. going through fetchRaw returned the first *object* the web
+            // endpoint gave — if that was a trackless/error payload, the mobile
+            // endpoint was never tried and the tracklist came back empty.
+            for (const url of this.attemptUrls(type, q.tralbumId, q.bandId)) {
+                const data = await this.fetchRawFrom(url);
+                if (!data) continue;
+                const tracks = this.normalize(data, { ...q, tralbumType: type });
+                if (!tracks.length) continue;
                 const at = Date.now();
                 this.tralbumCache.set(primaryKey, { tracks, at });
                 // also key by album id actually returned so track id lookup and later album id lookup share 1 cache entry.

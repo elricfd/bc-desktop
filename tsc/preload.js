@@ -8,7 +8,7 @@ const electron_1 = require("electron");
 // right cloak applies at document-start.
 let bcTheme = 'dark';
 try {
-    bcTheme = electron_1.ipcRenderer.sendSync('app:get-theme') || 'dark';
+    bcTheme = electron_1.ipcRenderer.sendSync('app:theme-for', location.href) || 'dark';
 }
 catch (e) { /* default dark */ }
 const antiFlashStyle = document.createElement('style');

@@ -85,15 +85,15 @@ export class PresenceService {
         const start = now - Math.floor((track.position || 0) * 1000);
         const end = track.duration > 0 ? start + Math.floor(track.duration * 1000) : undefined;
 
-        // the activity name is the line discord shows compactly. use "🎵 artist - song".
-        // (discord always prefixes the *type* verb, e.g. "Listening to", which can't be
-        // removed via rpc — the name carries the requested text.)
-        const label = (track.artist ? `${track.artist} - ${track.title}` : track.title).slice(0, 120);
+        // name shows as the compact status line. use "artist - song" (no emoji).
+        // note: discord always prefixes the type verb ("Listening to") and there's no
+        // way to remove it via rpc.
+        const nameLine = (track.artist ? `${track.artist} - ${track.title}` : track.title) || 'Bandcamp';
         const activity: any = {
-            name: `🎵 ${label}`,
+            name: nameLine.slice(0, 128),
             type: 2, // listening
             details: track.title.slice(0, 128),
-            state: (track.artist ? `by ${track.artist}` : 'Bandcamp').slice(0, 128),
+            state: (track.album || track.artist || 'Bandcamp').slice(0, 128),
             startTimestamp: start,
             largeImageKey: track.art || 'bandcamp_icon',
             largeImageText: (track.album || track.title).slice(0, 128),

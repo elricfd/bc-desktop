@@ -1,8 +1,8 @@
 {
     "name": "bandcamp-rpc",
-    "version": "1.0.0",
-    "description": "🎵 A standalone Bandcamp Desktop Client with Linux/Win support and Discord Rich Presence",
-    "author": "elricfd <elricfd@users.noreply.github.com>",
+    "version": "0.0.1",
+    "description": "🎵 A standalone Bandcamp Desktop Client with Linux/Win/Mac support and Last.FM",
+    "author": "elricfd <elric@bu.edu>",
     "homepage": "https://github.com/elricfd/bandcamp-rpc",
     "repository": {
         "type": "git",
@@ -12,9 +12,10 @@
     "scripts": {
         "copy-header": "cpx \"src/**/*.html\" tsc",
         "dev": "tsc && npm run copy-header && electron ./tsc/main.js --dev",
-        "build-win": "tsc && npm run copy-header && electron-builder -w nsis",
-        "build-win-ptb": "tsc && npm run copy-header && electron-builder -w portable",
-        "build-linux": "tsc && npm run copy-header && electron-builder -l deb appimage"
+        "build-win": "tsc && npm run copy-header && electron-builder --win",
+        "build-win-ptb": "tsc && npm run copy-header && electron-builder --win portable",
+        "build-linux": "tsc && npm run copy-header && electron-builder --linux",
+        "build-mac": "tsc && npm run copy-header && electron-builder --mac"
     },
     "build": {
         "appId": "com.bandcamp.desktop",
@@ -26,7 +27,8 @@
         "files": [
             "tsc/**/*",
             "assets/**/*",
-            "!node_modules/electron/**/*"
+            "node_modules/**/*",
+            "package.json"
         ],
         "win": {
             "target": "nsis",
@@ -50,6 +52,14 @@
             "category": "AudioVideo",
             "icon": "assets/bandcamp-button-circle-black-512.png",
             "maintainer": "elricfd <elricfd@users.noreply.github.com>"
+        },
+        "mac": {
+            "target": [
+                "dmg",
+                "zip"
+            ],
+            "category": "public.app-category.music",
+            "icon": "assets/bandcamp-button-circle-black-512.png"
         }
     },
     "devDependencies": {

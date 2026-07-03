@@ -26,7 +26,6 @@
             background: #121415; border: 1px solid var(--line); border-radius: 6px;
             color: var(--text); padding: 7px 10px; font-size: 12px; font-family: inherit; outline: none;
         }
-        /* custom chevron so it isn't jammed against the right edge */
         select {
             -webkit-appearance: none; appearance: none; padding-right: 30px;
             background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" fill="none" stroke="%239a968e" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>');
@@ -82,30 +81,40 @@
         }
         .dlfmt:hover { background: rgba(255,255,255,.06); }
 
-        /* inline tracklist: full-width panel that drops in below a release's row */
+        /* CRITICAL: Tracklist Layout Fixes */
         .tlinline {
-            grid-column: 1 / -1; display: flex; gap: 18px; align-items: flex-start;
+            grid-column: 1 / -1; display: flex; gap: 24px; align-items: flex-start;
             background: #1b1e1f; border: 1px solid var(--line); border-radius: 10px;
-            padding: 16px; margin: 2px 0; overflow: hidden; animation: tlslide .18s ease;
+            padding: 20px; margin: 4px 0; height: max-content; /* Force full height calculation */
+            animation: tlslide .18s ease;
         }
         @keyframes tlslide { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
-        .tlleft { width: 170px; flex-shrink: 0; }
+        .tlleft { width: 180px; flex-shrink: 0; position: sticky; top: 20px; }
         .tlart { width: 100%; aspect-ratio: 1/1; border-radius: 6px; object-fit: cover; background: #2a2e30; display: block; }
-        .tltitle { font-size: 14px; font-weight: 600; margin-top: 8px; }
-        .tlartist { font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .tltitle { font-size: 14px; font-weight: 600; margin-top: 12px; line-height: 1.3; }
+        .tlartist { font-size: 12px; color: var(--muted); margin-top: 4px; }
         .tlyear { font-size: 11px; color: var(--sub); margin-top: 2px; }
-        .tlbtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .tlbtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
         .tlbtns button {
             background: #24282a; border: 1px solid var(--line); color: var(--text);
-            border-radius: 6px; padding: 6px 10px; font-size: 11px; cursor: pointer; font-family: inherit;
+            border-radius: 6px; padding: 6px 12px; font-size: 11px; cursor: pointer; font-family: inherit;
+            flex: 1; text-align: center;
         }
-        .tlbtns .tlplayall { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .tlbtns .tlplayall { background: var(--accent); border-color: var(--accent); color: #fff; flex: 100%; }
         .tlbtns button:hover { filter: brightness(1.12); }
-        .tlright { flex: 1; min-width: 0; column-width: 260px; column-gap: 24px; }
-        .tlstate { color: var(--muted); font-size: 13px; padding: 8px 0; }
+        
+        /* Replaced column-width with a CSS Grid for robust wrapping */
+        .tlright { 
+            flex: 1; 
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); 
+            gap: 4px 24px; 
+            align-content: start;
+        }
+        .tlstate { color: var(--muted); font-size: 13px; padding: 8px 0; grid-column: 1 / -1; }
         .tlrow {
             display: flex; align-items: center; gap: 10px; padding: 6px 8px; cursor: pointer;
-            font-size: 13px; border-radius: 5px; break-inside: avoid;
+            font-size: 13px; border-radius: 5px; height: 32px;
         }
         .tlrow:hover { background: rgba(255,255,255,.06); }
         .tlnum { width: 20px; text-align: right; color: var(--sub); font-size: 12px; flex-shrink: 0; }

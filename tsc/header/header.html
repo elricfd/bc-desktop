@@ -26,6 +26,11 @@
             user-select: none;
         }
 
+        .spacer {
+            flex: 0.25;
+            -webkit-app-region: drag; /* Lets you drag the window by clicking this blank space */
+        }
+
         .nav-controls, .window-controls {
             display: flex;
             align-items: center;
@@ -38,15 +43,25 @@
             gap: 4px;
         }
 
-        .url-bar {
+        /* url bar wrapper holds the input + the new-tab (+) button on its right */
+        .urlwrap {
             -webkit-app-region: no-drag;
-            flex: 1; min-width: 0; height: 26px; margin: 0 10px;
+            position: relative; flex: 1; min-width: 0; margin: 0 16px 0 10px;
+        }
+        .url-bar {
+            box-sizing: border-box; /* keep padding+border inside the 100% width, so it can't overflow onto the collection button */
+            width: 100%; height: 26px; margin: 0;
             background: #1b1e1f; border: 1px solid #2a2e30; border-radius: 13px;
-            color: #cfcac2; font-size: 12px; padding: 0 12px; outline: none;
+            color: #cfcac2; font-size: 12px; padding: 0 34px 0 12px; outline: none;
             font-family: inherit;
         }
         .url-bar:focus { border-color: #1da0c3; color: #fff; }
         .url-bar::selection { background: #1da0c3; color: #fff; }
+        /* refresh button lives inside the url bar, on its right */
+        #btn-reload {
+            position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+            width: 26px; height: 22px; border-radius: 11px;
+        }
 
         button {
             background: transparent;
@@ -67,6 +82,9 @@
             background: #24282a;
             color: #fff;
         }
+
+        /* bandcamp (home) button hidden per preference; nav via url bar/back-forward */
+        #btn-home { display: none; }
 
         .polygon-logo {
             width: 22px;
@@ -145,13 +163,6 @@
         <svg width="14" height="14" viewBox="0 0 16 16"><path d="M5.5 3L10.5 8l-5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
         
-    <button id="btn-reload" title="Refresh">
-        <svg width="13" height="13" viewBox="0 0 16 16">
-            <path d="M13.5 8a5.5 5.5 0 0 1-11 0 5.5 5.5 0 0 1 9.5-3.7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
-            <path d="M10.5 2.5 12 4l-1.5 1.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-    </button>
-
     <button id="btn-newtab" title="New tab">
         <svg width="13" height="13" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
     </button>
@@ -159,8 +170,18 @@
 
 <div id="tabs" class="tabs"></div>
 
-<input id="url-bar" class="url-bar" type="text" spellcheck="false" autocomplete="off"
-       placeholder="Search Bandcamp or enter a link" aria-label="Address bar">
+<div class="urlwrap">
+    <input id="url-bar" class="url-bar" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search Bandcamp or enter a link" aria-label="Address bar">
+    <button id="btn-reload" title="Refresh">
+        <svg width="13" height="13" viewBox="0 0 16 16">
+            <path d="M13.5 8a5.5 5.5 0 0 1-11 0 5.5 5.5 0 0 1 9.5-3.7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            <path d="M10.5 2.5 12 4l-1.5 1.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+    </button>
+</div>
+
+<div class="spacer"></div>
 
 <div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
 

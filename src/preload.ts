@@ -6,7 +6,7 @@ import { ipcRenderer } from 'electron';
 // hidden and the whole page shows blank grey). theme is read synchronously so the
 // right cloak applies at document-start.
 let bcTheme = 'dark';
-try { bcTheme = (ipcRenderer.sendSync('app:get-theme') as string) || 'dark'; } catch (e) { /* default dark */ }
+try { bcTheme = (ipcRenderer.sendSync('app:theme-for', location.href) as string) || 'dark'; } catch (e) { /* default dark */ }
 const antiFlashStyle = document.createElement('style');
 antiFlashStyle.textContent = (bcTheme === 'light'
     ? ''

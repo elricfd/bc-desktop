@@ -249,6 +249,27 @@ function toIdStr(v) { const m = String(v ?? '').match(/\d+/); return m ? m[0] : 
 function getTheme() {
     return store.get('theme', 'dark') === 'light' ? 'light' : 'dark';
 }
+// artist / label pages (subdomains & bandcamp-pro custom domains) as opposed to the
+// core app pages (bandcamp.com, the daily). used by the "don't darken artist pages"
+// option so their custom themes show through.
+function isArtistPage(url) {
+    try {
+        const h = new URL(url).hostname.toLowerCase();
+        return !(h === 'bandcamp.com' || h === 'www.bandcamp.com' || h === 'daily.bandcamp.com');
+    }
+    catch {
+        return false;
+    }
+}
+// effective theme for a specific page: light overall, or (optionally) light on
+// artist pages so their custom look isn't inverted by darkreader.
+function themeForUrl(url) {
+    if (getTheme() === 'light')
+        return 'light';
+    if (store.get('darkArtistPages', true) === false && isArtistPage(url))
+        return 'light';
+    return 'dark';
+}
 // persist a resolved release year so year-sort enrichment is a one-time cost
 function persistYear(type, id, year) {
     if (!id || !year)
@@ -619,18 +640,27 @@ async function init() {
             return { ok: false, count: 0, error: err?.message || 'fetch failed' };
         }
     });
+    // resolve a collection item to a full tracklist. a purchased TRACK that's part
+    // of an album carries no artist/art of its own, so resolve it through its parent
+    // album (which has them) rather than the bare track endpoint.
+    const resolveRelease = async (req) => {
+        if (req.tralbumType === 't') {
+            const r = await bandcampApi.resolveQueueForTrack(req.tralbumId, req.bandId);
+            if (r.tracks.length)
+                return r;
+        }
+        const tracks = await bandcampApi.fetchTralbum({ tralbumId: req.tralbumId, tralbumType: req.tralbumType === 't' ? 't' : 'a', bandId: req.bandId });
+        return { tracks, activeIndex: 0 };
+    };
     // play release chosen in custom view: resolve full tracklist & hand to player (bypasses page trap entirely)
     electron_1.ipcMain.handle('collection:play', async (_e, req) => {
         try {
-            const tracks = await bandcampApi.fetchTralbum({
-                tralbumId: req.tralbumId,
-                tralbumType: req.tralbumType,
-                bandId: req.bandId,
-            });
+            const resolved = await resolveRelease(req);
+            const tracks = resolved.tracks;
             if (tracks.length && playerView && !playerView.webContents.isDestroyed()) {
                 // start at the chosen track (by id, else index) so the whole album
                 // becomes the queue with the rest of it queued behind
-                let active = typeof req.activeIndex === 'number' ? req.activeIndex : 0;
+                let active = typeof req.activeIndex === 'number' ? req.activeIndex : resolved.activeIndex;
                 if (req.trackId) {
                     const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId));
                     if (i !== -1)
@@ -652,7 +682,9 @@ async function init() {
     // fetch a release's tracklist (+ resolved release year) for the collection view
     electron_1.ipcMain.handle('collection:tracklist', async (_e, req) => {
         try {
-            const tracks = await bandcampApi.fetchTralbum({ tralbumId: req.tralbumId, tralbumType: req.tralbumType, bandId: req.bandId });
+            const tracks = (await resolveRelease(req)).tracks;
+            if (devMode)
+                console.log('[bcrpc] collection:tracklist ' + req.tralbumType + req.tralbumId + ' band=' + req.bandId + ' -> ' + tracks.length + ' tracks');
             if (!tracks.length)
                 return { ok: false, error: 'no tracks' };
             const year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req);
@@ -724,7 +756,11 @@ async function init() {
     // add a release chosen in the custom collection view to the queue (no interrupt)
     electron_1.ipcMain.handle('collection:enqueue', async (_e, req) => {
         try {
-            const tracks = await bandcampApi.fetchTralbum({ tralbumId: req.tralbumId, tralbumType: req.tralbumType, bandId: req.bandId });
+            const resolved = await resolveRelease(req);
+            // for a purchased single track, queue just that track (not the whole album)
+            const tracks = req.tralbumType === 't' && resolved.tracks[resolved.activeIndex]
+                ? [resolved.tracks[resolved.activeIndex]]
+                : resolved.tracks;
             if (tracks.length && playerView && !playerView.webContents.isDestroyed()) {
                 playerView.webContents.send('player:enqueue', { tracks });
                 return { ok: true, count: tracks.length };
@@ -859,9 +895,10 @@ async function init() {
     electron_1.ipcMain.on('app:settings', () => openSettings());
     electron_1.ipcMain.on('settings:close', () => { if (settingsWindow && !settingsWindow.isDestroyed())
         settingsWindow.close(); });
-    // preload reads the theme synchronously at document-start so its anti-flash
-    // cloak matches (no opacity cloak in light mode, else the page stays blank grey)
-    electron_1.ipcMain.on('app:get-theme', (e) => { e.returnValue = getTheme(); });
+    // preload reads the effective theme for its page synchronously at document-start
+    // so its anti-flash cloak matches (no opacity cloak when the page will be light,
+    // else it stays blank grey)
+    electron_1.ipcMain.on('app:theme-for', (e, url) => { e.returnValue = themeForUrl(typeof url === 'string' ? url : ''); });
     // let the user pick where purchased downloads are saved
     electron_1.ipcMain.handle('settings:choose-download-dir', async () => {
         const res = await electron_1.dialog.showOpenDialog(settingsWindow || mainWindow, {
@@ -887,6 +924,7 @@ async function init() {
             closeToTray: store.get('closeToTray', true),
             downloadDir: getDownloadDir(),
             theme: getTheme(),
+            darkArtistPages: store.get('darkArtistPages', true) !== false,
         };
     });
     electron_1.ipcMain.handle('settings:save', (_e, data) => {
@@ -901,15 +939,21 @@ async function init() {
                 store.set('discordClientId', data.discordClientId.trim());
                 presenceService.reconnect(); // apply new app id now
             }
+            let themeChanged = false;
             if (typeof data.theme === 'string') {
                 const next = data.theme === 'light' ? 'light' : 'dark';
-                const changed = next !== getTheme();
+                themeChanged = next !== getTheme();
                 store.set('theme', next);
-                // reload every tab so the cloak/darkreader state flips
-                if (changed)
-                    tabs.forEach((t) => { if (!t.view.webContents.isDestroyed())
-                        t.view.webContents.reload(); });
             }
+            if (typeof data.darkArtistPages === 'boolean') {
+                if (data.darkArtistPages !== (store.get('darkArtistPages', true) !== false))
+                    themeChanged = true;
+                store.set('darkArtistPages', data.darkArtistPages);
+            }
+            // reload every tab so the cloak/darkreader state flips
+            if (themeChanged)
+                tabs.forEach((t) => { if (!t.view.webContents.isDestroyed())
+                    t.view.webContents.reload(); });
             if (devMode)
                 console.log('[bcrpc] settings:save ok keys=' + JSON.stringify(Object.keys(data || {})));
             return { ok: true };
@@ -1035,8 +1079,8 @@ async function init() {
         wc.on('dom-ready', async () => {
             try {
                 await wc.insertCSS(SEARCHBOX_CSS);
-                if (getTheme() === 'light')
-                    return; // no darkreader in light mode
+                if (themeForUrl(wc.getURL()) === 'light')
+                    return; // no darkreader in light mode / on exempt artist pages
                 await wc.executeJavaScript(`
                     (function() {
                         if (window.__darkReaderActive) return;
@@ -1067,7 +1111,7 @@ async function init() {
                 const prev = antiFlashKeys.get(wc);
                 if (prev)
                     await wc.removeInsertedCSS(prev).catch(() => { });
-                const key = await wc.insertCSS(getTheme() === 'light' ? LIGHT_CSS : ANTI_FLASH_CSS, { cssOrigin: 'user' });
+                const key = await wc.insertCSS(themeForUrl(wc.getURL()) === 'light' ? LIGHT_CSS : ANTI_FLASH_CSS, { cssOrigin: 'user' });
                 antiFlashKeys.set(wc, key);
             }
             catch (err) {
