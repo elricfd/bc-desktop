@@ -1,11 +1,11 @@
-# Bandcamp Desktop (bc-desktop)
+# Bandcamp Desktop (bandcamp-rpc)
 
 🎵 A standalone **Bandcamp desktop client** for Windows & Linux, built on Electron.
 It wraps Bandcamp in a clean, dark-themed shell with a snappier custom player, 
 **Discord Rich Presence**, **Last.fm scrobbling**, a fast sortable collection 
 view, and one-click downloads of your purchases. YAAAAAAA :D
 
-![App Preview](./assets/bc-desktop.png)
+![App Preview](./bandcamp-rpc.png)
 
 ---
 
@@ -38,6 +38,15 @@ npm run build
 ```
 
 ### Key Shortcuts
+
+**Playback** (work anywhere in the app, except while typing in a text field):
+
+- `Space`: Play / pause.
+- `←` / `→`: Scrub 5 seconds back / forward — hold the key to keep scrubbing.
+- `Shift + ←` / `Shift + →`: Previous / next track (previous restarts the current song if you're past the 3-second mark).
+- `Shift + ↑` / `Shift + ↓`: Volume up / down.
+
+**Other**:
 
 - `F12`: Toggles developer tools window.
 - `Mouse Button 4` / `Mouse Button 5`: Natively maps browsing back and forward through layout view states.

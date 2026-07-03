@@ -29,7 +29,7 @@
 
         .spacer {
             flex: 0.25;
-            -webkit-app-region: drag;
+            -webkit-app-region: drag; /* Lets you drag the window by clicking this blank space */
         }
 
         .nav-controls, .window-controls {
@@ -120,7 +120,7 @@
 
         /* after minimizing, the window hides mid-hover so no mouseleave fires and the
            button stays highlighted on reopen. this suppresses hover until the mouse
-           moves again (js toggles .nohover) */
+           moves again (js toggles .nohover). */
         body.nohover .window-controls button:hover {
             background-color: transparent !important;
             color: #888 !important;
@@ -269,6 +269,29 @@
         else if (e.key === 'Escape') { urlBar.blur(); }
     });
     ipcRenderer.on('nav:url', (_e, url) => { if (!urlFocused) urlBar.value = url || ''; });
+
+    // media hotkeys while the header is focused (space play/pause, ←/→ scrub,
+    // shift+←/→ prev/next, shift+↑/↓ volume) forwarded to the player via main.
+    // NOTE: keep in sync with preload.ts / player.ts / collection.ts.
+    function mediaHotkeyOf(e) {
+        const t = e.target, tag = t ? t.tagName : '';
+        if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+        const space = e.key === ' ' || e.code === 'Space';
+        if (space && tag === 'BUTTON') return '';
+        if (space) return 'toggle';
+        if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
+        if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
+        if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
+        if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+        return '';
+    }
+    document.addEventListener('keydown', (e) => {
+        const cmd = mediaHotkeyOf(e);
+        if (!cmd) return;
+        e.preventDefault();
+        if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
+        ipcRenderer.send('player:hotkey', cmd);
+    });
 
     // download progress pill: shows % while downloading, then a done/failed flash
     const dlInd = document.getElementById('dl-indicator');

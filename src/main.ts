@@ -767,6 +767,14 @@ async function init() {
     };
     ipcMain.on('app:enqueue-url', (_e, raw: unknown) => enqueueFromUrl(typeof raw === 'string' ? raw : ''));
 
+    // media hotkeys pressed in any view (content pages, header, collection) are
+    // relayed to the player, which owns the audio element.
+    ipcMain.on('player:hotkey', (_e, cmd: unknown) => {
+        if (playerView && !playerView.webContents.isDestroyed()) {
+            playerView.webContents.send('player:hotkey', String(cmd || ''));
+        }
+    });
+
     // keep address bar in sync w/ content view (full loads + spa route changes) & re send once header finishes loading so it isn't blank
     const pushUrl = () => {
         if (headerView && !headerView.webContents.isDestroyed()) {

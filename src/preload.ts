@@ -124,6 +124,33 @@ document.addEventListener('keydown', (e) => {
     if (e.key === ' ' || e.key === 'Enter' || e.key === 'MediaPlayPause') sendGesture();
 }, true);
 
+// media hotkeys (soundcloud-style) from bandcamp pages: space play/pause,
+// ←/→ scrub 5s (hold to keep scrubbing), shift+←/→ prev/next, shift+↑/↓ volume.
+// mapped here (not in main) so typing in the page's inputs is never hijacked.
+// NOTE: keep in sync with player.ts / collection.ts / header.html — this preload
+// is sandboxed so the mapping can't live in a shared module.
+const mediaHotkeyOf = (e: KeyboardEvent): string => {
+    const t = e.target as HTMLElement | null;
+    const tag = t ? t.tagName : '';
+    if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+    const space = e.key === ' ' || e.code === 'Space';
+    if (space && tag === 'BUTTON') return '';
+    if (space) return 'toggle';
+    if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
+    if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
+    if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
+    if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    return '';
+};
+document.addEventListener('keydown', (e) => {
+    const cmd = mediaHotkeyOf(e);
+    if (!cmd) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
+    try { ipcRenderer.send('player:hotkey', cmd); } catch (err) { /* bridge gone */ }
+}, true);
+
 // mouse back/forward -> main (debounced) so don't double w/ os app command
 window.addEventListener('mouseup', (e) => {
     if (e.button === 3) ipcRenderer.send('app:back');

@@ -312,6 +312,30 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
 document.addEventListener('click', () => closeMenu());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); closeTracklist(); } });
 
+// media hotkeys while the collection is focused (space play/pause, ←/→ scrub,
+// shift+←/→ prev/next, shift+↑/↓ volume) forwarded to the player via main.
+// NOTE: keep in sync with preload.ts / player.ts / header.html.
+function mediaHotkeyOf(e: KeyboardEvent): string {
+    const t = e.target as HTMLElement | null;
+    const tag = t ? t.tagName : '';
+    if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+    const space = e.key === ' ' || e.code === 'Space';
+    if (space && tag === 'BUTTON') return '';
+    if (space) return 'toggle';
+    if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
+    if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
+    if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
+    if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    return '';
+}
+document.addEventListener('keydown', (e) => {
+    const cmd = mediaHotkeyOf(e);
+    if (!cmd) return;
+    e.preventDefault();
+    if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
+    ipcRenderer.send('player:hotkey', cmd);
+});
+
 let yearsRequested = false;
 
 function requestYears(): void {

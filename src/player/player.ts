@@ -255,21 +255,74 @@ audio.addEventListener('ended', () => {
     if (next) playCurrent();
 });
 
-// transport does nothing until something is actually loaded
-$('btn-play').addEventListener('click', () => {
+// transport does nothing until something is actually loaded. shared by the
+// buttons and the app-wide media hotkeys.
+function doToggle(): void {
     if (!queue.current()) return;
     audio.paused ? audio.play().catch(() => {}) : audio.pause();
-});
-$('btn-prev').addEventListener('click', () => {
+}
+function doPrev(): void {
     if (!queue.current()) return;
     // restart current track if past 3s mark, otherwise go back
     if (audio.currentTime > 3) { audio.currentTime = 0; return; }
     if (queue.prev()) playCurrent();
-});
-$('btn-next').addEventListener('click', () => {
+}
+function doNext(): void {
     if (!queue.current()) return;
-    const next = queue.next();
-    if (next) playCurrent();
+    if (queue.next()) playCurrent();
+}
+function doSeekBy(delta: number): void {
+    if (!queue.current() || !audio.duration) return;
+    // stop just shy of the end so a big forward jump doesn't fire 'ended'
+    audio.currentTime = Math.min(Math.max(0, audio.currentTime + delta), Math.max(0, audio.duration - 0.25));
+    emitNowPlaying(true);
+}
+function doVolBy(delta: number): void {
+    const v = Math.min(1, Math.max(0, Number(vol.value) + delta));
+    vol.value = String(v);
+    audio.volume = v;
+}
+$('btn-play').addEventListener('click', doToggle);
+$('btn-prev').addEventListener('click', doPrev);
+$('btn-next').addEventListener('click', doNext);
+
+// media hotkeys (soundcloud-style): space play/pause, ←/→ scrub 5s (hold to keep
+// scrubbing), shift+←/→ prev/next track, shift+↑/↓ volume. every view maps keys
+// itself (so typing in inputs is never hijacked) & forwards here via main.
+function runHotkey(cmd: string): void {
+    if (cmd === 'toggle') doToggle();
+    else if (cmd === 'prev') doPrev();
+    else if (cmd === 'next') doNext();
+    else if (cmd === 'seek-back') doSeekBy(-5);
+    else if (cmd === 'seek-fwd') doSeekBy(5);
+    else if (cmd === 'vol-up') doVolBy(0.05);
+    else if (cmd === 'vol-down') doVolBy(-0.05);
+}
+ipcRenderer.on('player:hotkey', (_e, cmd: unknown) => runHotkey(String(cmd || '')));
+
+// same mapping for keys pressed while the player view itself is focused.
+// NOTE: keep in sync with the copies in preload.ts / collection.ts / header.html
+// (the content preload is sandboxed, so this can't live in a shared module).
+function mediaHotkeyOf(e: KeyboardEvent): string {
+    const t = e.target as HTMLElement | null;
+    const tag = t ? t.tagName : '';
+    if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+    const space = e.key === ' ' || e.code === 'Space';
+    if (space && tag === 'BUTTON') return ''; // let a focused button click natively
+    if (space) return 'toggle';
+    if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
+    if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
+    if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
+    if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    return '';
+}
+document.addEventListener('keydown', (e) => {
+    const cmd = mediaHotkeyOf(e);
+    if (!cmd) return;
+    e.preventDefault();
+    // holding a key repeats seek/volume (that's the scrub) but not transport toggles
+    if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
+    runHotkey(cmd);
 });
 
 const REPEAT_CYCLE: RepeatMode[] = ['off', 'all', 'one'];
