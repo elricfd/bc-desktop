@@ -1,0 +1,4 @@
+﻿node_modules/
+tsc/
+build/
+**/.DS_Store

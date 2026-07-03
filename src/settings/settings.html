@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Bandcamp</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+        body {
+            background: #181a1b; color: #e8e6e3;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Roboto, sans-serif;
+            font-size: 13px;
+            /* ctrl+a used to select the whole chrome (incl. the close btn); only let inputs be selected */
+            user-select: none;
+        }
+        input { user-select: text; }
+        /* our own titlebar so the native (windows) close btn can't stick highlighted */
+        .titlebar {
+            -webkit-app-region: drag;
+            display: flex; align-items: center; justify-content: space-between;
+            height: 36px; padding: 0 6px 0 14px; background: #121415; border-bottom: 1px solid #1e2224;
+            position: sticky; top: 0; z-index: 10;
+        }
+        .titlebar .title { font-size: 12px; color: #9a968e; }
+        .titlebar .winclose {
+            -webkit-app-region: no-drag;
+            width: 34px; height: 26px; margin: 0; padding: 0; border-radius: 4px;
+            background: transparent; color: #888; font-size: 13px; line-height: 1;
+            display: flex; align-items: center; justify-content: center; cursor: pointer;
+        }
+        .titlebar .winclose:hover { background: #e81123; color: #fff; }
+        .body { padding: 22px; }
+        h1 { font-size: 16px; margin-bottom: 4px; }
+        .hint { color: #848079; font-size: 11px; margin-bottom: 18px; line-height: 1.5; }
+        .hint code { color: #b7b2a8; background: #121415; padding: 1px 4px; border-radius: 3px; }
+        .section { border: 1px solid #2a2e30; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #9a968e; margin-bottom: 12px; }
+        label { display: block; font-size: 11px; color: #9a968e; margin: 10px 0 4px; }
+        input[type="text"], input[type="password"] {
+            width: 100%; background: #121415; border: 1px solid #2a2e30; border-radius: 5px;
+            color: #e8e6e3; padding: 8px 10px; font-size: 12px;
+        }
+        input:focus { outline: none; border-color: #1da0c3; }
+        .row { display: flex; align-items: center; justify-content: space-between; }
+        button {
+            background: #1da0c3; color: #fff; border: none; border-radius: 5px;
+            padding: 8px 14px; font-size: 12px; cursor: pointer; margin-top: 14px;
+        }
+        button:hover { filter: brightness(1.1); }
+        button.ghost { background: #24282a; }
+        .toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+        .status { font-size: 11px; margin-top: 8px; min-height: 14px; }
+        .ok { color: #5fb878; } .err { color: #d66; }
+    </style>
+</head>
+<body>
+    <div class="titlebar">
+        <span class="title">Settings</span>
+        <button class="winclose" id="winClose" title="Close" type="button">✕</button>
+    </div>
+    <div class="body">
+    <h1>Settings</h1>
+    <div class="hint">Scrobbling and Rich Presence are driven by the in-app player.</div>
+    <div class="status err" id="fatal"></div>
+
+    <div class="section">
+        <h2>Last.fm Scrobbling</h2>
+        <label>API Key</label>
+        <input type="text" id="apiKey" placeholder="Last.fm API key" autocomplete="off">
+        <label>Shared Secret</label>
+        <input type="password" id="apiSecret" placeholder="Last.fm shared secret" autocomplete="off">
+        <div class="row" style="margin-top:12px;">
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="lfmEnabled"> Enable scrobbling</label>
+            <span id="lfmUser" class="status"></span>
+        </div>
+        <div class="row">
+            <button id="btnConnect">Connect account</button>
+        </div>
+        <div class="status" id="lfmStatus"></div>
+    </div>
+
+    <div class="section">
+        <h2>Discord Rich Presence</h2>
+        <label class="toggle"><input type="checkbox" id="discordEnabled"> show what i'm listening to</label>
+        <label>Discord Application ID (optional)</label>
+        <input type="text" id="discordClientId" placeholder="leave blank to use the built-in app" autocomplete="off">
+        <div class="hint" style="margin:6px 0 0;">works out of the box with the built-in app id; the discord desktop app just needs to be running. only set this to use your own app.</div>
+    </div>
+
+    <div class="section">
+        <h2>General</h2>
+        <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="autoLoadCollection"> load collection in the background on startup</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="darkMode"> dark mode (uncheck for bandcamp's native theme)</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="noDarkArtistPages"> disable dark mode on artist pages (keeps their custom themes)</label>
+        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+        <label style="margin-top:0;">Download location</label>
+        <div class="row" style="gap:8px;margin-top:2px;">
+            <input type="text" id="downloadDir" readonly style="flex:1;" title="where purchased downloads are saved">
+            <button id="btnDownloadDir" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
+        </div>
+    </div>
+
+    <button id="btnSave">Save</button>
+    <span class="status" id="saveStatus" style="margin-left:10px;"></span>
+    </div>
+    <!-- /.body -->
+
+    <script>
+        // if renderer isnt node integrated, require() throws and whole
+        // script dies which looks exactly like "save does nothing
+        let ipcRenderer;
+        try {
+            ipcRenderer = require('electron').ipcRenderer;
+            ipcRenderer.send('settings:log', 'booted');
+        } catch (e) {
+            document.getElementById('fatal').textContent =
+                'settings bridge unavailable (' + (e && e.message) + '). the window is not node-integrated.';
+        }
+        const $ = (id) => document.getElementById(id);
+        const log = (m) => { try { ipcRenderer && ipcRenderer.send('settings:log', m); } catch (e) {} };
+
+        // custom titlebar close (frameless window)
+        $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
+
+        async function load() {
+            if (!ipcRenderer) return;
+            const s = await ipcRenderer.invoke('settings:get');
+            const lfm = s.lastfm || {};
+            $('apiKey').value = lfm.apiKey || '';
+            $('apiSecret').value = lfm.apiSecret || '';
+            $('lfmEnabled').checked = lfm.enabled !== false;
+            $('discordEnabled').checked = s.discordEnabled !== false;
+            $('discordClientId').value = s.discordClientId || '';
+            $('closeToTray').checked = s.closeToTray !== false;
+            $('autoLoadCollection').checked = s.autoLoadCollection === true;
+            $('darkMode').checked = s.theme !== 'light'; // dark by default
+            // stored setting is "apply dark to artist pages" (default off); the
+            // checkbox is the inverse ("disable…"), so it starts checked
+            $('noDarkArtistPages').checked = s.darkArtistPages !== true;
+            $('downloadDir').value = s.downloadDir || '';
+            if (lfm.username) { $('lfmUser').textContent = 'connected: ' + lfm.username; $('lfmUser').className = 'status ok'; }
+        }
+
+        async function persist() {
+            if (!ipcRenderer) return { ok: false, error: 'no bridge' };
+            return ipcRenderer.invoke('settings:save', {
+                lastfm: { apiKey: $('apiKey').value.trim(), apiSecret: $('apiSecret').value.trim(), enabled: $('lfmEnabled').checked },
+                discordEnabled: $('discordEnabled').checked,
+                discordClientId: $('discordClientId').value.trim(),
+                closeToTray: $('closeToTray').checked,
+                autoLoadCollection: $('autoLoadCollection').checked,
+                theme: $('darkMode').checked ? 'dark' : 'light',
+                darkArtistPages: !$('noDarkArtistPages').checked
+            });
+        }
+
+        if (ipcRenderer) {
+            $('btnSave').onclick = async () => {
+                log('save clicked');
+                const res = await persist();
+                log('save result ' + JSON.stringify(res));
+                if (res && res.ok === false) { $('saveStatus').textContent = 'save failed: ' + (res.error || '?'); $('saveStatus').className = 'status err'; }
+                else { $('saveStatus').textContent = 'saved.'; $('saveStatus').className = 'status ok'; }
+            };
+
+            $('btnDownloadDir').onclick = async () => {
+                const res = await ipcRenderer.invoke('settings:choose-download-dir');
+                if (res && res.dir) $('downloadDir').value = res.dir;
+            };
+
+            $('btnConnect').onclick = async () => {
+                await persist();
+                const res = await ipcRenderer.invoke('lastfm:begin-auth');
+                if (res.error) { $('lfmStatus').textContent = res.error; $('lfmStatus').className = 'status err'; }
+                else { $('lfmStatus').textContent = 'Authorize in your browser — this will connect automatically…'; $('lfmStatus').className = 'status'; }
+            };
+
+            // auto-detected once the user approves in their browser (no button needed)
+            ipcRenderer.on('lastfm:authed', (_e, res) => {
+                if (!res || res.error) {
+                    $('lfmStatus').textContent = res && res.error ? res.error : 'authorization not completed';
+                    $('lfmStatus').className = 'status err';
+                    return;
+                }
+                $('lfmStatus').textContent = 'Connected as ' + res.username;
+                $('lfmStatus').className = 'status ok';
+                $('lfmUser').textContent = 'Connected: ' + res.username;
+                $('lfmUser').className = 'status ok';
+            });
+
+            load();
+        }
+    </script>
+</body>
+</html>

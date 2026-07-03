@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Bandcamp</title>
+    <style>
+        @font-face {
+            font-family: 'Helvetica Neue CDN';
+            src: url("../../assets/helveticaneue.woff2") format('woff2');
+            font-weight: 400;
+            font-style: normal;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121415;
+            color: #888;
+            font-family: -apple-system, "Helvetica Neue CDN", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+            -webkit-app-region: drag;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 40px;
+            box-sizing: border-box;
+            border-bottom: 1px solid #1e2224;
+            user-select: none;
+        }
+
+        .spacer {
+            flex: 0.25;
+            -webkit-app-region: drag;
+        }
+
+        .nav-controls, .window-controls {
+            display: flex;
+            align-items: center;
+            height: 100%;
+            -webkit-app-region: no-drag;
+        }
+
+        .nav-controls {
+            padding-left: 8px;
+            gap: 4px;
+        }
+
+        /* url bar wrapper holds the input + the refresh button on its right */
+        .urlwrap {
+            -webkit-app-region: no-drag;
+            position: relative; flex: 4; min-width: 0; margin: 0 0 0 10px;
+        }
+        /* blank space after the url bar (~1/4 of the bar's width) before the controls */
+        .spacer { flex: 1; height: 100%; -webkit-app-region: drag; }
+        .url-bar {
+            box-sizing: border-box; /* keep padding+border inside the 100% width, so it can't overflow onto the collection button */
+            width: 100%; height: 26px; margin: 0;
+            background: #1b1e1f; border: 1px solid #2a2e30; border-radius: 13px;
+            color: #cfcac2; font-size: 12px; padding: 0 34px 0 12px; outline: none;
+            font-family: inherit;
+        }
+        .url-bar:focus { border-color: #1da0c3; color: #fff; }
+        .url-bar::selection { background: #1da0c3; color: #fff; }
+        /* refresh button lives inside the url bar, on its right */
+        #btn-reload {
+            position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+            width: 26px; height: 22px; border-radius: 11px;
+        }
+
+        button {
+            background: transparent;
+            border: none;
+            color: #888;
+            width: 34px;
+            height: 30px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            transition: all 0.15s ease;
+        }
+
+        button:hover {
+            background: #24282a;
+            color: #fff;
+        }
+
+        /* bandcamp (home) button hidden per preference; nav via url bar/back-forward */
+        #btn-home { display: none; }
+
+        .polygon-logo {
+            width: 22px;
+            height: auto;
+            fill: #736b5e;
+            transition: fill 0.15s ease;
+        }
+
+        #btn-home:hover .polygon-logo {
+            fill: #ffffff;
+        }
+
+        /* native window hitboxxssssss */
+        .window-controls button.control {
+            width: 46px;
+            height: 40px;
+            border-radius: 0;
+            color: #888;
+        }
+
+        .window-controls button.control:hover {
+            background-color: rgba(255, 255, 255, 0.08);
+            color: #ffffff;
+        }
+
+        .window-controls button.close:hover {
+            background-color: #e81123 !important;
+            color: #ffffff !important;
+        }
+
+        /* after minimizing, the window hides mid-hover so no mouseleave fires and the
+           button stays highlighted on reopen. this suppresses hover until the mouse
+           moves again (js toggles .nohover) */
+        body.nohover .window-controls button:hover {
+            background-color: transparent !important;
+            color: #888 !important;
+        }
+
+        /* transient download indicator, centered over the bar */
+        #dl-indicator {
+            -webkit-app-region: no-drag;
+            position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+            display: none; align-items: center; gap: 6px;
+            background: #1b1e1f; border: 1px solid #2a2e30; border-radius: 13px;
+            color: #cfcac2; font-size: 11px; padding: 4px 12px; max-width: 60%;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+        }
+        #dl-indicator .dot { color: #1da0c3; }
+
+        /* tab strip: only shown when >1 tab; shrinks the url bar via flex */
+        .tabs {
+            -webkit-app-region: no-drag;
+            display: none; align-items: center; gap: 4px; margin-left: 6px;
+            max-width: 46%; overflow: hidden;
+        }
+        .tab {
+            display: flex; align-items: center; gap: 6px; max-width: 160px; height: 26px;
+            padding: 0 5px 0 10px; background: #1b1e1f; border: 1px solid #2a2e30;
+            border-radius: 6px; color: #b7b2a8; font-size: 11px; cursor: pointer; flex-shrink: 1; min-width: 0;
+        }
+        .tab.active { background: #24282a; color: #fff; border-color: #1da0c3; }
+        .tab .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tab .tx {
+            width: 16px; height: 16px; flex-shrink: 0; display: flex; align-items: center;
+            justify-content: center; border-radius: 3px; color: #888; font-size: 10px;
+        }
+        .tab .tx:hover { background: rgba(255,255,255,.14); color: #fff; }
+    </style>
+</head>
+<body>
+
+<div class="nav-controls">
+    <button id="btn-home" title="Homepage">
+        <svg viewBox="0 0 168 100" class="polygon-logo" aria-hidden="true">
+            <path d="M113.88 98.17H0L53.18 0h113.88z"></path>
+        </svg>
+    </button>
+
+    <button id="btn-back" title="Back">
+        <svg width="14" height="14" viewBox="0 0 16 16"><path d="M10.5 3L5.5 8l5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+
+    <button id="btn-forward" title="Forward">
+        <svg width="14" height="14" viewBox="0 0 16 16"><path d="M5.5 3L10.5 8l-5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+        
+    <button id="btn-newtab" title="New tab">
+        <svg width="13" height="13" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+    </button>
+</div>
+
+<div id="tabs" class="tabs"></div>
+
+<div class="urlwrap">
+    <input id="url-bar" class="url-bar" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search Bandcamp or enter a link" aria-label="Address bar">
+    <button id="btn-reload" title="Refresh">
+        <svg width="13" height="13" viewBox="0 0 16 16">
+            <path d="M13.5 8a5.5 5.5 0 0 1-11 0 5.5 5.5 0 0 1 9.5-3.7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+            <path d="M10.5 2.5 12 4l-1.5 1.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+    </button>
+</div>
+
+<div class="spacer"></div>
+
+<div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
+
+<div class="window-controls">
+    <button id="btn-collection" title="Your collection" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z"/></svg>
+    </button>
+    <button id="btn-settings" title="Settings" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94a7.49 7.49 0 0 0 .05-.94 7.49 7.49 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.61l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7 7 0 0 0-1.62-.94l-.36-2.54a.49.49 0 0 0-.49-.41h-3.84a.49.49 0 0 0-.49.41l-.36 2.54a7 7 0 0 0-1.62.94l-2.39-.96a.5.5 0 0 0-.6.22L2.74 8.87a.5.5 0 0 0 .12.61l2.03 1.58a7.49 7.49 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.61l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96a7 7 0 0 0 1.62.94l.36 2.54a.49.49 0 0 0 .49.41h3.84a.49.49 0 0 0 .49-.41l.36-2.54a7 7 0 0 0 1.62-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.61l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+    </button>
+    <button class="control minimize" id="btn-min" title="Minimize" type="button">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+    <button class="control maximize" id="btn-max" title="Maximize" type="button">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+    </button>
+    <button class="control close" id="btn-close" title="Close" type="button">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+    </button>
+</div>
+
+<script>
+    const { ipcRenderer } = require('electron');
+
+    document.getElementById('btn-back').onclick = () => ipcRenderer.send('app:back');
+    document.getElementById('btn-forward').onclick = () => ipcRenderer.send('app:forward');
+    document.getElementById('btn-reload').onclick = () => ipcRenderer.send('app:reload');
+    document.getElementById('btn-home').onclick = () => ipcRenderer.send('app:home');
+    document.getElementById('btn-settings').onclick = () => ipcRenderer.send('app:settings');
+
+    const btnCollection = document.getElementById('btn-collection');
+    btnCollection.onclick = () => ipcRenderer.send('collection:toggle');
+    ipcRenderer.on('collection:state', (_e, open) => { btnCollection.style.color = open ? '#1da0c3' : ''; });
+
+    // tabs: render chips only when >1 tab (so the url bar stays full otherwise)
+    document.getElementById('btn-newtab').onclick = () => ipcRenderer.send('tab:new');
+    const tabsEl = document.getElementById('tabs');
+    ipcRenderer.on('tabs:state', (_e, st) => {
+        const tabs = (st && st.tabs) || [];
+        tabsEl.innerHTML = '';
+        if (tabs.length <= 1) { tabsEl.style.display = 'none'; return; }
+        tabsEl.style.display = 'flex';
+        for (const t of tabs) {
+            const el = document.createElement('div');
+            el.className = 'tab' + (t.active ? ' active' : '');
+            el.title = t.title || 'Bandcamp';
+            const tt = document.createElement('span'); tt.className = 'tt'; tt.textContent = t.title || 'Bandcamp';
+            const tx = document.createElement('span'); tx.className = 'tx'; tx.textContent = '✕';
+            el.appendChild(tt); el.appendChild(tx);
+            el.addEventListener('click', (e) => { if (e.target !== tx) ipcRenderer.send('tab:activate', t.id); });
+            el.addEventListener('mouseup', (e) => { if (e.button === 1) { e.preventDefault(); ipcRenderer.send('tab:close', t.id); } });
+            tx.addEventListener('click', (e) => { e.stopPropagation(); ipcRenderer.send('tab:close', t.id); });
+            tabsEl.appendChild(el);
+        }
+    });
+
+    document.getElementById('btn-min').onclick = () => {
+        ipcRenderer.send('window:minimize');
+        // suppress the stuck :hover; cleared as soon as the mouse moves again
+        document.body.classList.add('nohover');
+    };
+    window.addEventListener('mousemove', () => document.body.classList.remove('nohover'));
+    document.getElementById('btn-max').onclick = () => ipcRenderer.send('window:maximize');
+    document.getElementById('btn-close').onclick = () => ipcRenderer.send('window:close');
+
+    // address bar: shows current page URL & navigates on enter
+    // while user editing, stop overwriting value w nav updates
+    const urlBar = document.getElementById('url-bar');
+    let urlFocused = false;
+    urlBar.addEventListener('focus', () => { urlFocused = true; urlBar.select(); });
+    urlBar.addEventListener('blur', () => { urlFocused = false; });
+    urlBar.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { ipcRenderer.send('app:navigate-url', urlBar.value); urlBar.blur(); }
+        else if (e.key === 'Escape') { urlBar.blur(); }
+    });
+    ipcRenderer.on('nav:url', (_e, url) => { if (!urlFocused) urlBar.value = url || ''; });
+
+    // download progress pill: shows % while downloading, then a done/failed flash
+    const dlInd = document.getElementById('dl-indicator');
+    const dlText = document.getElementById('dl-text');
+    let dlHideTimer;
+    ipcRenderer.on('download:progress', (_e, d) => {
+        clearTimeout(dlHideTimer);
+        dlInd.style.display = 'flex';
+        if (d.state === 'progressing') {
+            dlText.textContent = (d.percent >= 0 ? d.percent + '% — ' : '') + (d.name || 'downloading…');
+        } else if (d.state === 'completed') {
+            dlText.textContent = '✓ ' + (d.name || 'downloaded');
+            dlHideTimer = setTimeout(() => { dlInd.style.display = 'none'; }, 3000);
+        } else {
+            dlText.textContent = '✕ ' + (d.name || 'download failed');
+            dlHideTimer = setTimeout(() => { dlInd.style.display = 'none'; }, 3000);
+        }
+    });
+</script>
+</body>
+</html>
