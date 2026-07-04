@@ -101,3 +101,22 @@ export interface DownloadFormat {
     /** the popplers download url for this format. */
     url: string;
 }
+
+/** one story in the custom feed view (new releases / activity from artists & fans you follow). */
+export interface FeedStory {
+    /** bandcamp story type: 'nr' new release, 'df' fan collected, others pass through. */
+    type: string;
+    /** epoch seconds of the story. */
+    date: number;
+    title: string;
+    artist: string;
+    art: string;
+    url: string;
+    tralbumId: string;
+    tralbumType: TralbumType;
+    bandId: string;
+    /** featured track id when the story carries one. */
+    trackId: string;
+    /** collector's name for 'df' stories ("collected by …"); '' otherwise. */
+    via: string;
+}

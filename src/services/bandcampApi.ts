@@ -1,5 +1,5 @@
 import type { Session } from 'electron';
-import type { PlayerTrack, TralbumType, CollectionItem, DownloadFormat } from '../shared/types';
+import type { PlayerTrack, TralbumType, CollectionItem, DownloadFormat, FeedStory } from '../shared/types';
 
 // mirrors res strat used by bandcamp player ext: hit cred tralbum endpoints to obtain full tracklist (w/ direct stream urls) for release. this is what lets player advance thru album or collection w/out scraping per track dom.
 
@@ -34,6 +34,12 @@ function pickStream(file: any): string {
 export class BandcampApi {
     // main proc owns content view session; we reuse it so reqs carry fan login cookies (priv streams resolve correctly).
     constructor(private readonly getSession: () => Session | null) {}
+
+    /** set by main: called whenever bandcamp answers HTTP 429 (drives the user-facing notice). */
+    on429?: () => void;
+    private notify429(status: number): void {
+        if (status === 429) { try { this.on429?.(); } catch { /* notifier failed */ } }
+    }
 
     // cache full tracklists by `${type}:${tralbumId}` and track -> album map by track id. both expire after cache ttl ms.
     private readonly tralbumCache = new Map<string, { tracks: PlayerTrack[]; at: number }>();
@@ -71,6 +77,59 @@ export class BandcampApi {
         return this.yearCache.get(key) || 0;
     }
 
+    /**
+     * release details for one collection/feed item: genre tags, tracklist
+     * (title+duration), release year & about text. drives the collection's search
+     * index / list view and the feed's expanded cards. status-aware so the bulk
+     * index builder can back off on 429 instead of silently losing items.
+     */
+    async fetchSearchIndex(q: TralbumQuery, interactive = false): Promise<
+        { ok: true; tags: string[]; tracks: { title: string; duration: number }[]; year: number; about: string }
+        | { ok: false; retryable: boolean }
+    > {
+        const id = toId(q.tralbumId);
+        if (!id) return { ok: false, retryable: false };
+        if (interactive) this.noteInteractive();
+        const types: TralbumType[] = q.tralbumType === 't' ? ['t', 'a'] : ['a', 't'];
+        let sawData = false;
+        for (const type of types) {
+            for (const url of this.attemptUrls(type, id, q.bandId)) {
+                let { data, status } = await this.fetchRawFromStatus(url);
+                // a user's click retries through a 429 (the crawler yields to us);
+                // the bulk crawler instead returns retryable & backs off itself
+                if (status === 429 && interactive) {
+                    for (let attempt = 0; attempt < 3 && status === 429; attempt++) {
+                        await new Promise((res) => setTimeout(res, 800 * Math.pow(2, attempt)));
+                        ({ data, status } = await this.fetchRawFromStatus(url));
+                    }
+                }
+                if (status === 429) return { ok: false, retryable: true };
+                if (!data) continue;
+                sawData = true;
+                const tags = (Array.isArray(data.tags) ? data.tags : [])
+                    .map((t: any) => String((t && (t.name || t.norm_name)) || '').trim())
+                    .filter(Boolean);
+                const rows: any[] = Array.isArray(data.trackinfo) ? data.trackinfo : Array.isArray(data.tracks) ? data.tracks : [];
+                if (!tags.length && !rows.length) continue; // thin payload; try the next endpoint
+                const year = this.extractYear(data);
+                if (year) this.yearCache.set(`${q.tralbumType}:${id}`, year);
+                return {
+                    ok: true,
+                    tags,
+                    tracks: rows.map((t: any) => ({
+                        title: String((t && t.title) || '').trim(),
+                        duration: Math.max(0, Math.floor(Number(t && t.duration) || 0)),
+                    })).filter((t) => t.title),
+                    year,
+                    about: String(data.about || (data.current && data.current.about) || '').trim(),
+                };
+            }
+        }
+        // real payloads but no tags/tracks anywhere: cache the emptiness (not retryable)
+        if (sawData) return { ok: true, tags: [], tracks: [], year: 0, about: '' };
+        return { ok: false, retryable: false };
+    }
+
     /** seed the year cache (e.g. from a persisted store) so we don't refetch across sessions. */
     primeYear(type: TralbumType, id: string, year: number): void {
         if (id && year) this.yearCache.set(`${type}:${toId(id)}`, year);
@@ -103,24 +162,47 @@ export class BandcampApi {
         return [info.toString(), mobile.toString()];
     }
 
-    /** GET one endpoint & return its json object (or null). */
-    private async fetchRawFrom(url: string): Promise<any | null> {
+    /** GET one endpoint & return {data,status} so bulk callers can react to 429s. */
+    private async fetchRawFromStatus(url: string): Promise<{ data: any | null; status: number }> {
         const session = this.getSession();
-        if (!session) return null;
+        if (!session) return { data: null, status: 0 };
         try {
             const res = await session.fetch(url, { credentials: 'include' } as any);
-            if (!res.ok) return null;
+            if (!res.ok) { this.notify429(res.status); return { data: null, status: res.status }; }
             const data: any = await res.json();
-            if (!data || typeof data !== 'object') return null;
+            if (!data || typeof data !== 'object') return { data: null, status: res.status };
             // bandcamp returns 200 with {error:true,error_message:...} for bad/retired
             // endpoints (tralbum/2/info now answers "bad function"). treating that as
             // data poisoned every fallback: track→album lookups died, so collection
             // track items played with the page/band artist instead of the release's.
-            if (data.error) return null;
-            return data;
+            if (data.error) return { data: null, status: res.status };
+            return { data, status: res.status };
         } catch {
-            return null;
+            return { data: null, status: 0 };
         }
+    }
+
+    // user-initiated fetches note themselves here; the background index crawler
+    // yields while this is fresh so interactive actions (opening a tracklist,
+    // paging the feed) never lose the 429 budget to the crawl.
+    private lastInteractiveAt = 0;
+    noteInteractive(): void { this.lastInteractiveAt = Date.now(); }
+    interactiveIdleMs(): number { return Date.now() - this.lastInteractiveAt; }
+
+    /**
+     * GET one endpoint & return its json object (or null). used by the
+     * user-initiated paths, so it marks interactive activity & retries 429s
+     * with a short backoff instead of failing the user's click.
+     */
+    private async fetchRawFrom(url: string): Promise<any | null> {
+        this.noteInteractive();
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const { data, status } = await this.fetchRawFromStatus(url);
+            if (data) return data;
+            if (status !== 429) return null;
+            await new Promise((res) => setTimeout(res, 800 * Math.pow(2, attempt)));
+        }
+        return null;
     }
 
     /** fetch raw tralbum payload for single (type, id) used to read parent album id of track before fetching full album. */
@@ -361,9 +443,16 @@ export class BandcampApi {
      *
      * prev impl broke on any transient !ok (esp http 429) mid paginate, truncating collection to whatever it had (hence 580 / 1265 of 2780). now: big page size (fewer reqs = faster & less likely throttled) + per page retry w/ backoff so a single hiccup can't cut the run short. onprogress reports running count to view.
      */
+    /**
+     * stopAtKeys: keys ("<type><id>") already known to the caller. the collection
+     * api pages newest-first, so hitting a known item means everything after it is
+     * already cached — stop there. this is what makes Reload/startup an
+     * incremental "check for new purchases" instead of a full re-scan.
+     */
     async fetchCollection(
         maxItems = 20000,
-        onProgress?: (added: CollectionItem[], soFar: number, total: number) => void
+        onProgress?: (added: CollectionItem[], soFar: number, total: number) => void,
+        stopAtKeys?: Set<string>
     ): Promise<CollectionItem[]> {
         const session = this.getSession();
         if (!session) return [];
@@ -398,6 +487,7 @@ export class BandcampApi {
                         credentials: 'include',
                     } as any);
                     if (r.ok) return await r.json();
+                    this.notify429(r.status);
                     // 429 / 5xx: back off & retry rather than abandoning the whole collection
                     if (r.status !== 429 && r.status < 500) return null;
                 } catch {
@@ -420,13 +510,19 @@ export class BandcampApi {
             // maps sale key -> download page url for owned items
             const redl: Record<string, string> = (data?.redownload_urls && typeof data.redownload_urls === 'object') ? data.redownload_urls : {};
             const added: CollectionItem[] = [];
+            let hitKnown = false;
             for (const it of items) {
                 const c = this.normalizeCollectionItem(it, redl);
                 const key = c.tralbumType + c.tralbumId;
                 if (!c.tralbumId || seen.has(key)) continue;
+                if (stopAtKeys && stopAtKeys.has(key)) { hitKnown = true; break; }
                 seen.add(key);
                 out.push(c);
                 added.push(c);
+            }
+            if (hitKnown) {
+                if (onProgress && added.length) onProgress(added, out.length, out.length);
+                return out;
             }
             // hand each page to the caller as it arrives so the view can render
             // progressively instead of blocking on the whole (multi-request) fetch
@@ -438,6 +534,115 @@ export class BandcampApi {
             token = next;
         }
         return out;
+    }
+
+    /** fetch a small binary (album cover) for the on-disk release cache. */
+    async fetchBinary(url: string): Promise<Buffer | null> {
+        const session = this.getSession();
+        if (!session || !url || !url.startsWith('https://')) return null;
+        try {
+            const r = await session.fetch(url, { credentials: 'include' } as any);
+            if (!r.ok) return null;
+            return Buffer.from(await r.arrayBuffer());
+        } catch {
+            return null;
+        }
+    }
+
+    // --- fan feed (custom feed view) -----------------------------------------
+
+    private cachedFanId = '';
+
+    /** resolve (and cache) the logged-in fan's id from the collection summary. */
+    private async getFanId(): Promise<string> {
+        if (this.cachedFanId) return this.cachedFanId;
+        const session = this.getSession();
+        if (!session) return '';
+        try {
+            const r = await session.fetch('https://bandcamp.com/api/fan/2/collection_summary', {
+                credentials: 'include',
+            } as any);
+            if (r.ok) {
+                const d: any = await r.json();
+                this.cachedFanId = toId(d?.fan_id ?? d?.collection_summary?.fan_id);
+            }
+        } catch { /* stay '' */ }
+        return this.cachedFanId;
+    }
+
+    /** normalize one feed story entry (fields vary between story types & api versions). */
+    private normalizeStory(s: any): FeedStory | null {
+        if (!s || typeof s !== 'object') return null;
+        const tralbumId = toId(s.item_id ?? s.tralbum_id ?? s.album_id);
+        if (!tralbumId) return null;
+        const typeRaw = String(s.item_type ?? s.tralbum_type ?? 'a');
+        const artId = toId(s.item_art_id ?? s.art_id);
+        const date = Number(s.story_date_ts ?? 0) ||
+            Math.floor(Date.parse(String(s.story_date || s.new_release_date || '')) / 1000) || 0;
+        return {
+            type: String(s.story_type || '').trim() || 'nr',
+            date: date > 0 ? date : 0,
+            title: String(s.item_title ?? s.album_title ?? s.title ?? '').trim(),
+            artist: String(s.band_name ?? s.artist ?? '').trim(),
+            art: artId ? `https://f4.bcbits.com/img/a${artId}_9.jpg` : '',
+            url: String(s.item_url ?? s.tralbum_url ?? '').trim(),
+            tralbumId,
+            tralbumType: (typeRaw === 't' || typeRaw === 'track') ? 't' : 'a',
+            bandId: toId(s.band_id ?? s.selling_band_id),
+            trackId: toId(s.featured_track ?? s.featured_track_id ?? s.track_id),
+            via: String(s.fan_name ?? '').trim(),
+        };
+    }
+
+    /**
+     * one page of the fan feed (stories from artists & fans you follow) via the
+     * same endpoint bandcamp's own "older stories" button posts to. olderThan is
+     * the unix ts to page back from (0/omitted = newest).
+     */
+    async fetchFeed(olderThan = 0): Promise<{ ok: boolean; stories: FeedStory[]; oldest: number; error?: string }> {
+        const session = this.getSession();
+        if (!session) return { ok: false, stories: [], oldest: 0, error: 'no session' };
+        const fanId = await this.getFanId();
+        if (!fanId) return { ok: false, stories: [], oldest: 0, error: 'not logged in' };
+        this.noteInteractive(); // feed paging is user-driven: crawler yields to it
+        let data: any = null;
+        try {
+            const body = new URLSearchParams({
+                fan_id: fanId,
+                older_than: String(olderThan > 0 ? olderThan : Math.floor(Date.now() / 1000) + 3600),
+            }).toString();
+            for (let attempt = 0; ; attempt++) {
+                const r = await session.fetch('https://bandcamp.com/fan_dash_feed_updates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body,
+                    credentials: 'include',
+                } as any);
+                if (r.ok) { data = await r.json(); break; }
+                this.notify429(r.status);
+                // throttled: retry a few times with backoff before giving up
+                if (r.status !== 429 || attempt >= 3) return { ok: false, stories: [], oldest: 0, error: 'http ' + r.status };
+                await new Promise((res) => setTimeout(res, 1000 * Math.pow(2, attempt)));
+            }
+        } catch (e: any) {
+            return { ok: false, stories: [], oldest: 0, error: e?.message || 'feed fetch failed' };
+        }
+        // entries live under .stories on the web endpoint; be lenient about shape
+        const root = (data && typeof data === 'object' && (data.stories || data)) || {};
+        const rawEntries: any[] = Array.isArray(root.entries) ? root.entries
+            : Array.isArray(root.stories) ? root.stories
+            : Array.isArray(data?.entries) ? data.entries : [];
+        const stories: FeedStory[] = [];
+        let oldest = 0;
+        for (const s of rawEntries) {
+            const n = this.normalizeStory(s);
+            if (!n) continue;
+            if (n.date && (!oldest || n.date < oldest)) oldest = n.date;
+            stories.push(n);
+        }
+        const rootOldest = Number(root.oldest_story_date) || 0;
+        if (rootOldest && (!oldest || rootOldest < oldest)) oldest = rootOldest;
+        return { ok: true, stories, oldest };
     }
 
     // --- downloads (purchased items) ----------------------------------------

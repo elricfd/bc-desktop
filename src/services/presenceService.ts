@@ -67,17 +67,38 @@ export class PresenceService {
         return this.store ? this.store.get('discordEnabled', true) !== false : true;
     }
 
-    async update(track: NowPlaying): Promise<void> {
-        if (!this.isConnected) return;
+    // presence options (settings). the per-line/icon/button toggles were removed:
+    // artist, track, album & cover always show; small icon & buttons never do.
+    options(): { showWhenPaused: boolean } {
+        return {
+            showWhenPaused: this.store ? this.store.get('discordShowWhenPaused', false) === true : false,
+        };
+    }
 
-        if (!this.enabled() || !track.isPlaying || !track.title) {
+    private lastTrack: NowPlaying | null = null;
+    /** most recent track the player reported (drives the settings preview). */
+    nowPlaying(): NowPlaying | null { return this.lastTrack; }
+
+    /** re-send the current activity (called when settings toggles change). */
+    refresh(): void {
+        this.lastKey = '';
+        if (this.lastTrack) void this.update(this.lastTrack);
+    }
+
+    async update(track: NowPlaying): Promise<void> {
+        this.lastTrack = track;
+        if (!this.isConnected) return;
+        const o = this.options();
+
+        if (!this.enabled() || !track.title || (!track.isPlaying && !o.showWhenPaused)) {
             this.lastKey = '';
             await this.client.user?.clearActivity().catch(() => {});
             return;
         }
 
-        // don't re send same activity every progress tick
-        const key = `${track.id}|${track.title}|${track.isPlaying}`;
+        // don't re send same activity every progress tick. options are part of the
+        // key so refresh() after a settings change re-sends immediately.
+        const key = `${track.id}|${track.title}|${track.isPlaying}|${JSON.stringify(o)}`;
         if (key === this.lastKey) return;
         this.lastKey = key;
 
@@ -85,27 +106,24 @@ export class PresenceService {
         const start = now - Math.floor((track.position || 0) * 1000);
         const end = track.duration > 0 ? start + Math.floor(track.duration * 1000) : undefined;
 
-        // discord rich presence has exactly three text slots: the "Listening to
-        // <name>" header, then `details` (bold) and `state`. map them to
-        // album / song(bold) / artist so all three show, song bold, no "by ".
+        // discord rich presence text slots on a type-2 (listening) activity render
+        // as FOUR lines: the "Listening to <name>" header, `details` (bold),
+        // `state`, and largeImageText as its own bottom line. mapping:
+        //   header = artist ("Listening to {artist}")
+        //   details (bold) = song title
+        //   state = artist
+        //   largeImageText = album
         const activity: any = {
-            name: (track.album || track.title || 'Bandcamp').slice(0, 128), // header line = album
+            name: (track.artist || 'Bandcamp').slice(0, 128),               
             type: 2, // listening
-            details: (track.title || 'Bandcamp').slice(0, 128),             // bold line = song
-            state: (track.artist || 'Bandcamp').slice(0, 128),              // line = artist (no "by")
-            startTimestamp: start,
+            details: (track.title || 'Bandcamp').slice(0, 128),
+            state: (track.artist || 'Bandcamp').slice(0, 128),
             largeImageKey: track.art || 'bandcamp_icon',
             largeImageText: (track.album || track.title || 'Bandcamp').slice(0, 128),
-            smallImageKey: 'bandcamp_icon',
-            smallImageText: 'Bandcamp Desktop',
             instance: false,
+            startTimestamp: start,
         };
         if (end) activity.endTimestamp = end;
-        // clicking the cover/text can NOT open a link — discord only makes buttons
-        // clickable — so the release link is this button.
-        if (track.url?.startsWith('https://')) {
-            activity.buttons = [{ label: 'Open on Bandcamp', url: track.url }];
-        }
 
         try {
             await this.client.user?.setActivity(activity);

@@ -82,6 +82,7 @@
     <div class="section">
         <h2>Discord Rich Presence</h2>
         <label class="toggle"><input type="checkbox" id="discordEnabled"> show what i'm listening to</label>
+        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="dOptPaused"> keep showing while paused </label>
         <label>Discord Application ID (optional)</label>
         <input type="text" id="discordClientId" placeholder="leave blank to use the built-in app" autocomplete="off">
         <div class="hint" style="margin:6px 0 0;">works out of the box with the built-in app id; the discord desktop app just needs to be running. only set this to use your own app.</div>
@@ -91,14 +92,26 @@
         <h2>General</h2>
         <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
         <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="autoLoadCollection"> load collection in the background on startup</label>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="gridHeaders"> show group headers in the collection grid view</label>
         <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="darkMode"> dark mode (uncheck for bandcamp's native theme)</label>
         <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="noDarkArtistPages"> disable dark mode on artist pages (keeps their custom themes)</label>
-        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+    </div>
+
+    <div class="section">
+        <h2>Storage</h2>
         <label style="margin-top:0;">Download location</label>
         <div class="row" style="gap:8px;margin-top:2px;">
             <input type="text" id="downloadDir" readonly style="flex:1;" title="where purchased downloads are saved">
             <button id="btnDownloadDir" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
         </div>
+        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+        <label class="toggle"><input type="checkbox" id="cacheReleases"> permanently cache collection data to instantly load in future (tracklist, cover art, tags, etc.)</label>
+        <label style="margin-top:10px;">Cache location</label>
+        <div class="row" style="gap:8px;margin-top:2px;">
+            <input type="text" id="cacheDir" readonly style="flex:1;" title="where cached covers are stored">
+            <button id="btnCacheDir" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
+        </div>
+        <div class="hint" id="cacheSize" style="margin:6px 0 0;"></div>
     </div>
 
     <button id="btnSave">Save</button>
@@ -123,6 +136,17 @@
         // custom titlebar close (frameless window)
         $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
 
+        async function refreshCacheInfo() {
+            if (!ipcRenderer) return;
+            try {
+                const info = await ipcRenderer.invoke('settings:cache-info');
+                if (info && info.dir) $('cacheDir').value = info.dir;
+                const b = (info && info.bytes) || 0;
+                $('cacheSize').textContent = 'cache size: ' +
+                    (b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB');
+            } catch (e) { /* leave blank */ }
+        }
+
         async function load() {
             if (!ipcRenderer) return;
             const s = await ipcRenderer.invoke('settings:get');
@@ -132,8 +156,13 @@
             $('lfmEnabled').checked = lfm.enabled !== false;
             $('discordEnabled').checked = s.discordEnabled !== false;
             $('discordClientId').value = s.discordClientId || '';
+            const dOpts = s.discordOpts || {};
+            $('dOptPaused').checked = dOpts.showWhenPaused === true;
+            $('gridHeaders').checked = s.gridHeaders === true;
             $('closeToTray').checked = s.closeToTray !== false;
             $('autoLoadCollection').checked = s.autoLoadCollection === true;
+            $('cacheReleases').checked = s.cacheReleases === true;
+            refreshCacheInfo();
             $('darkMode').checked = s.theme !== 'light'; // dark by default
             // stored setting is "apply dark to artist pages" (default off); the
             // checkbox is the inverse ("disable…"), so it starts checked
@@ -148,8 +177,11 @@
                 lastfm: { apiKey: $('apiKey').value.trim(), apiSecret: $('apiSecret').value.trim(), enabled: $('lfmEnabled').checked },
                 discordEnabled: $('discordEnabled').checked,
                 discordClientId: $('discordClientId').value.trim(),
+                discordOpts: { showWhenPaused: $('dOptPaused').checked },
+                gridHeaders: $('gridHeaders').checked,
                 closeToTray: $('closeToTray').checked,
                 autoLoadCollection: $('autoLoadCollection').checked,
+                cacheReleases: $('cacheReleases').checked,
                 theme: $('darkMode').checked ? 'dark' : 'light',
                 darkArtistPages: !$('noDarkArtistPages').checked
             });
@@ -168,6 +200,13 @@
                 const res = await ipcRenderer.invoke('settings:choose-download-dir');
                 if (res && res.dir) $('downloadDir').value = res.dir;
             };
+
+            $('btnCacheDir').onclick = async () => {
+                const res = await ipcRenderer.invoke('settings:choose-cache-dir');
+                if (res && res.dir) $('cacheDir').value = res.dir;
+                refreshCacheInfo();
+            };
+
 
             $('btnConnect').onclick = async () => {
                 await persist();

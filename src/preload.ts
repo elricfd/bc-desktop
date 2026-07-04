@@ -20,6 +20,19 @@ const antiFlashRoot = document.head || document.documentElement;
 if (antiFlashRoot) antiFlashRoot.appendChild(antiFlashStyle);
 else document.addEventListener('DOMContentLoaded', () => (document.head || document.documentElement).appendChild(antiFlashStyle));
 
+// failsafe: if darkreader never paints (script error, throttled subresources),
+// the cloak used to leave the page an empty grey forever. lift it after a few
+// seconds — worst case is a brief unthemed flash instead of a hang.
+if (bcTheme !== 'light') {
+    setTimeout(() => {
+        try {
+            if (!document.documentElement.getAttribute('data-darkreader-scheme')) {
+                antiFlashStyle.textContent = antiFlashStyle.textContent.replace('opacity: 0 !important', 'opacity: 1');
+            }
+        } catch (e) { /* keep cloak */ }
+    }, 6000);
+}
+
 // mirror discover grid (/api/discover/1/discover_web) into window.__bcrpc.discover so extractor resolves genre page play to full album w/out track -> album lookup. injected as main world script at document start (csp stripped) before page grabs fetch. passive read of resp clone
 const CAPTURE_SRC = `
 (function () {
@@ -151,6 +164,21 @@ document.addEventListener('keydown', (e) => {
     e.stopPropagation();
     if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
     try { ipcRenderer.send('player:hotkey', cmd); } catch (err) { /* bridge gone */ }
+}, true);
+
+// the big play button on a fan playlist page toggles bandcamp's own (muted,
+// hidden) player without firing a stream request, so the audio trap never sees
+// it & nothing plays. drive the extractor directly: the #PlaylistPage blob has
+// the whole tracklist with stream urls, so main can queue it straight away.
+document.addEventListener('click', (e) => {
+    if (e.button !== 0) return;
+    const t = e.target as HTMLElement;
+    // header-level button only: it sits in .play-pause-container and carries
+    // tracklistkey="playlist:<id>". per-track buttons (.play-target in .over-art)
+    // stream normally & get trapped, so they don't need this.
+    const btn = t && t.closest ? t.closest('.play-pause-container .play-pause-button[tracklistkey^="playlist"], .play-pause-container .play-pause-button') : null;
+    if (!btn || !document.getElementById('PlaylistPage')) return;
+    ipcRenderer.send('app:playlist-play');
 }, true);
 
 // mouse back/forward -> main (debounced) so don't double w/ os app command

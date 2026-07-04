@@ -1,6 +1,7 @@
 import { app, BrowserWindow, BrowserView, ipcMain, Menu, Tray, nativeImage, shell, dialog, clipboard } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { pathToFileURL } from 'url';
 import { platform } from 'os';
 import Store from 'electron-store';
 import { autoUpdater } from 'electron-updater';
@@ -13,6 +14,19 @@ import type { NowPlaying, ResolveStreamRequest, ResolveStreamResponse, TralbumTy
 
 const darkReaderPath = require.resolve('darkreader/darkreader.js');
 const darkReaderJS = fs.readFileSync(darkReaderPath, 'utf8');
+
+// last-resort crash telemetry: log to userData/crash.log (and the console) so a
+// hard crash actually says WHERE it happened instead of just closing the app.
+process.on('uncaughtException', (err) => {
+    const line = new Date().toISOString() + ' uncaught: ' + ((err && (err.stack || err)) || 'unknown') + '\n';
+    try { fs.appendFileSync(path.join(app.getPath('userData'), 'crash.log'), line); } catch { /* disk */ }
+    console.error('[bcrpc] ' + line);
+});
+process.on('unhandledRejection', (err: any) => {
+    const line = new Date().toISOString() + ' unhandled rejection: ' + ((err && (err.stack || err)) || 'unknown') + '\n';
+    try { fs.appendFileSync(path.join(app.getPath('userData'), 'crash.log'), line); } catch { /* disk */ }
+    console.error('[bcrpc] ' + line);
+});
 
 // search-box padding tweak injected on dom-ready
 const SEARCHBOX_CSS = `
@@ -83,6 +97,60 @@ const ANTI_FLASH_CSS = `
 `;
 
 const store = new Store({ clearInvalidConfig: true });
+
+// --- big on-disk caches -------------------------------------------------------
+// the release index / collection listing / year cache used to live in
+// electron-store, but conf re-reads AND re-writes the entire config.json
+// SYNCHRONOUSLY on every access — once these caches grew to megabytes the main
+// process spent seconds blocked on json i/o and the window went "not responding"
+// (looked like a crash). they now live in their own files with in-memory state
+// and debounced async writes.
+class DiskCache<T> {
+    private data: T;
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    constructor(private readonly file: string, fallback: T) {
+        let d: T = fallback;
+        try { d = JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { /* fresh cache */ }
+        this.data = d;
+    }
+    get(): T { return this.data; }
+    replace(d: T): void { this.data = d; this.save(); }
+    /** schedule a write; call after mutating the object returned by get() */
+    save(): void {
+        if (this.timer) return;
+        this.timer = setTimeout(() => { this.timer = null; this.writeNow(); }, 2000);
+    }
+    flush(): void {
+        if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+        try { fs.writeFileSync(this.file, JSON.stringify(this.data)); } catch { /* disk */ }
+    }
+    private writeNow(): void {
+        try { fs.writeFile(this.file, JSON.stringify(this.data), () => { /* async */ }); } catch { /* disk */ }
+    }
+    sizeBytes(): number { try { return fs.statSync(this.file).size; } catch { return 0; } }
+}
+type IndexCacheEntryT = { g: string[]; t: [string, number][]; y: number; a?: string };
+let releaseIndexDisk: DiskCache<Record<string, IndexCacheEntryT>>;
+let collectionItemsDisk: DiskCache<any[]>;
+let yearsDisk: DiskCache<Record<string, number>>;
+function initDiskCaches(): void {
+    const ud = app.getPath('userData');
+    releaseIndexDisk = new DiskCache(path.join(ud, 'release-index.json'), {});
+    collectionItemsDisk = new DiskCache(path.join(ud, 'collection-items.json'), []);
+    yearsDisk = new DiskCache(path.join(ud, 'year-cache.json'), {});
+    // one-time migration out of config.json (also shrinks it back to settings-only)
+    try {
+        const oldIdx = store.get('releaseIndexCache') as any;
+        if (oldIdx && typeof oldIdx === 'object' && !Object.keys(releaseIndexDisk.get()).length) releaseIndexDisk.replace(oldIdx);
+        const oldItems = store.get('collectionItemsCache') as any;
+        if (Array.isArray(oldItems) && oldItems.length && !collectionItemsDisk.get().length) collectionItemsDisk.replace(oldItems);
+        const oldYears = store.get('yearCache') as any;
+        if (oldYears && typeof oldYears === 'object' && !Object.keys(yearsDisk.get()).length) yearsDisk.replace(oldYears);
+        for (const k of ['releaseIndexCache', 'collectionItemsCache', 'yearCache', 'searchIndexCache']) {
+            try { (store as any).delete(k); } catch { /* absent */ }
+        }
+    } catch { /* start with fresh caches */ }
+}
 let mainWindow: BrowserWindow;
 let headerView: BrowserView;
 // contentView is an alias for the *active* tab's view; every place that navigates
@@ -91,6 +159,8 @@ let contentView: BrowserView;
 let playerView: BrowserView;
 let collectionView: BrowserView;
 let collectionVisible = false;
+let feedView: BrowserView;
+let feedVisible = false;
 
 interface Tab { id: number; view: BrowserView; title: string; }
 let tabs: Tab[] = [];
@@ -156,8 +226,9 @@ function adjustContentViews() {
         height: height - (headerHeight + playerHeight),
     };
     contentView.setBounds(contentRect);
-    // collection view (added only while open) fills content area
+    // collection / feed views (added only while open) fill the content area
     if (collectionView && collectionVisible) collectionView.setBounds(contentRect);
+    if (feedView && feedVisible) feedView.setBounds(contentRect);
 }
 
 function setupTray() {
@@ -206,6 +277,13 @@ function closeCollection() {
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('collection:state', false);
 }
 
+// hide the custom feed overlay (close btn / home btn / navigation)
+function closeFeed() {
+    if (feedVisible && feedView) mainWindow.removeBrowserView(feedView);
+    feedVisible = false;
+    if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('feed:state', false);
+}
+
 // external (non-bandcamp) hosts artists link to that should pop a separate window
 // instead of hijacking the main view. kept to social/promo sites so checkout &
 // login redirects (paypal, stripe, google, facebook oauth…) still work in-app.
@@ -240,21 +318,62 @@ function isArtistPage(url: string): boolean {
     } catch { return false; }
 }
 
+// fan playlist pages ship their own dark design; darkreader double-inverts it
+// into weird colors, so they're always exempt (our chrome stays dark regardless).
+function isPlaylistPage(url: string): boolean {
+    try {
+        const u = new URL(url);
+        return /(^|\.)bandcamp\.com$/i.test(u.hostname) && /\/playlist(\/|$)/.test(u.pathname);
+    } catch { return false; }
+}
+
 // effective theme for a specific page: dark everywhere, except artist pages are
-// left light (their custom look) unless the user opted into darkening them.
-// note the flipped default: dark on artist pages is OFF unless explicitly enabled.
+// left light (their custom look) unless the user opted into darkening them,
+// and playlist pages which are natively dark already.
 function themeForUrl(url: string): 'dark' | 'light' {
     if (getTheme() === 'light') return 'light';
+    if (isPlaylistPage(url)) return 'light';
     if (store.get('darkArtistPages', false) !== true && isArtistPage(url)) return 'light';
     return 'dark';
+}
+
+// opt-in on-disk release cache: covers + the release index (tracklists, tags,
+// album info) + the collection listing itself. audio is never cached.
+function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
+// covers live under the user-chosen cache location (settings), else app data
+function artCacheDir(): string {
+    const custom = store.get('cacheDir', '') as string;
+    const base = custom && typeof custom === 'string' && fs.existsSync(custom) ? custom : app.getPath('userData');
+    const d = path.join(base, 'art-cache');
+    try { fs.mkdirSync(d, { recursive: true }); } catch { /* exists */ }
+    return d;
+}
+// total bytes held by the release cache (covers on disk + the metadata stores)
+function cacheSizeBytes(): number {
+    let total = 0;
+    try {
+        const dir = artCacheDir();
+        for (const f of fs.readdirSync(dir)) {
+            try { total += fs.statSync(path.join(dir, f)).size; } catch { /* skip */ }
+        }
+    } catch { /* no dir */ }
+    total += releaseIndexDisk.sizeBytes() + collectionItemsDisk.sizeBytes() + yearsDisk.sizeBytes();
+    return total;
+}
+function artCachePath(type: string, id: string): string {
+    return path.join(artCacheDir(), type + toIdStr(id) + '.jpg');
+}
+function localArtUrl(type: string, id: string): string {
+    const p = artCachePath(type, id);
+    try { if (fs.existsSync(p)) return pathToFileURL(p).href; } catch { /* keep remote */ }
+    return '';
 }
 
 // persist a resolved release year so year-sort enrichment is a one-time cost
 function persistYear(type: string, id: string, year: number): void {
     if (!id || !year) return;
-    const c = store.get('yearCache', {}) as Record<string, number>;
-    c[type + ':' + id] = year;
-    store.set('yearCache', c);
+    yearsDisk.get()[type + ':' + id] = year;
+    yearsDisk.save();
 }
 
 // where purchased downloads land: user pick if set, else os downloads folder
@@ -299,9 +418,34 @@ function openInNewWindow(url: string) {
 
 async function init() {
     Menu.setApplicationMenu(null);
+    initDiskCaches(); // big caches out of config.json (see DiskCache)
     presenceService = new PresenceService(store);
     lastfmService = new LastfmService(store);
     bandcampApi = new BandcampApi(() => (contentView ? contentView.webContents.session : null));
+
+    // surface bandcamp's HTTP 429 throttling to the user (previously only visible
+    // in the devtools console). our own styled window, not a native dialog; shown
+    // at most once per session; "Don't show again" persists the opt-out.
+    let notice429Shown = false;
+    let notice429Win: BrowserWindow | null = null;
+    bandcampApi.on429 = () => {
+        if (notice429Shown || store.get('hide429Notice', false) === true) return;
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        notice429Shown = true;
+        try {
+            notice429Win = new BrowserWindow({
+                width: 470, height: 220, parent: mainWindow, frame: false, resizable: false,
+                backgroundColor: '#181a1b', // opaque: transparent windows are crash-prone on some setups
+                webPreferences: { nodeIntegration: true, contextIsolation: false },
+            });
+            notice429Win.loadFile(path.join(__dirname, 'notice', 'notice429.html'));
+            notice429Win.on('closed', () => { notice429Win = null; });
+        } catch { notice429Win = null; }
+    };
+    ipcMain.on('notice429:close', (_e, never: unknown) => {
+        if (never === true) store.set('hide429Notice', true);
+        if (notice429Win && !notice429Win.isDestroyed()) notice429Win.close();
+    });
     setupTray();
 
     mainWindow = new BrowserWindow({
@@ -346,6 +490,15 @@ async function init() {
             console.log('[bcrpc] collection view FAILED ' + code + ' ' + desc + ' ' + url));
     }
 
+    feedView = new BrowserView({
+        webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode }
+    });
+    feedView.setBackgroundColor('#181a1b');
+    if (devMode) {
+        feedView.webContents.on('did-fail-load', (_e, code, desc, url) =>
+            console.log('[bcrpc] feed view FAILED ' + code + ' ' + desc + ' ' + url));
+    }
+
     mainWindow.addBrowserView(contentView);
     mainWindow.addBrowserView(headerView);
     mainWindow.addBrowserView(playerView);
@@ -354,6 +507,7 @@ async function init() {
     wireContentView(contentView); // attach nav/trap/theme/context-menu handlers
 
     collectionView.webContents.loadFile(path.join(__dirname, 'collection', 'collection.html'));
+    feedView.webContents.loadFile(path.join(__dirname, 'feed', 'feed.html'));
 
     // opt-in (settings, off by default): pre-fetch the collection in the background
     // right after startup so opening the view is instant. small delay so the fetch
@@ -486,7 +640,29 @@ async function init() {
             }
         }
 
+        // (playlist header play button never streams, so it can't be trapped;
+        // the preload click hook below drives the extractor directly instead)
+
         callback({ cancel: false });
+    });
+
+    // fan playlist header play button: bandcamp toggles its own (muted, hidden)
+    // player without requesting a stream, so the audio trap never fires and the
+    // button appears dead. the preload detects the click & we run the extractor
+    // directly — #PlaylistPage embeds the full tracklist with stream urls.
+    ipcMain.on('app:playlist-play', () => {
+        if (!contentView || contentView.webContents.isDestroyed()) return;
+        const seq = ++trapSeq;
+        // no trapped stream url: fromPlaylistPage plays the embedded queue from track 1
+        contentView.webContents.executeJavaScript(buildExtractorScript('about:playlist', 'raw'))
+            .then((data: any) => {
+                if (seq !== trapSeq) return;
+                if (devMode) console.log('[bcrpc] playlist-play ' + (data?.queue ? 'n=' + data.queue.length : 'EMPTY'));
+                if (data?.queue?.length && playerView && !playerView.webContents.isDestroyed()) {
+                    playerView.webContents.send('player:stream-incoming', data);
+                }
+            })
+            .catch((err: any) => { if (devMode) console.log('[bcrpc] playlist-play ERROR ' + (err && (err.message || err))); });
     });
 
     session.webRequest.onHeadersReceived((details, callback) => {
@@ -578,12 +754,18 @@ async function init() {
     // uses hardLoad so it always works even from a wedged collection page.
     ipcMain.on('app:home', () => {
         closeCollection();
+        closeFeed();
         hardLoad('https://bandcamp.com');
     });
 
-    // clicking track title / artist name in player bar navs page
+    // clicking track title / artist name in player bar (or a feed card) navs page;
+    // close the overlays so the page isn't loading invisibly underneath them
     ipcMain.on('app:navigate', (_e, url: unknown) => {
-        if (typeof url === 'string' && url.startsWith('https://')) hardLoad(url);
+        if (typeof url === 'string' && url.startsWith('https://')) {
+            closeCollection();
+            closeFeed();
+            hardLoad(url);
+        }
     });
 
     // address bar nav: accept full url, bare domain/path, or free text search (routed to bandcamp search)
@@ -602,6 +784,7 @@ async function init() {
     ipcMain.on('collection:toggle', () => {
         collectionVisible = !collectionVisible;
         if (collectionVisible) {
+            closeFeed(); // one overlay at a time
             mainWindow.addBrowserView(collectionView);
             mainWindow.setTopBrowserView(headerView); // keep header/player above it
             mainWindow.setTopBrowserView(playerView);
@@ -617,20 +800,81 @@ async function init() {
     });
     ipcMain.on('collection:close', () => closeCollection());
 
+    // custom feed view (stories from artists & fans you follow)
+    ipcMain.on('feed:log', (_e, msg: unknown) => { if (devMode) console.log('[bcrpc:feed] ' + String(msg)); });
+    ipcMain.on('feed:toggle', () => {
+        feedVisible = !feedVisible;
+        if (feedVisible) {
+            closeCollection(); // one overlay at a time
+            mainWindow.addBrowserView(feedView);
+            mainWindow.setTopBrowserView(headerView); // keep header/player above it
+            mainWindow.setTopBrowserView(playerView);
+            adjustContentViews();
+            feedView.webContents.send('feed:shown');
+        } else {
+            mainWindow.removeBrowserView(feedView);
+        }
+        if (headerView && !headerView.webContents.isDestroyed()) {
+            headerView.webContents.send('feed:state', feedVisible);
+        }
+    });
+    ipcMain.on('feed:close', () => closeFeed());
+
+    // one page of the fan feed; olderThan pages backwards (0 = newest)
+    ipcMain.handle('feed:fetch', async (_e, olderThan: unknown) => {
+        const res = await bandcampApi.fetchFeed(Number(olderThan) || 0);
+        if (devMode) console.log('[bcrpc] feed:fetch older=' + olderThan + ' -> ' + res.stories.length + (res.error ? ' err=' + res.error : ''));
+        return res;
+    });
+
     // fetch fan whole collection (paginated) for custom view; stream running count back so the view can show load progress on big collections
+    // with the release cache on, items are persisted so the collection still opens
+    // offline, and art urls are swapped to locally cached covers when present.
+    const mapCachedArt = (list: any[]): any[] => {
+        if (!cacheReleasesOn()) return list;
+        return list.map((i) => {
+            const local = localArtUrl(i.tralbumType, i.tralbumId);
+            return local ? { ...i, art: local } : i;
+        });
+    };
     ipcMain.handle('collection:fetch', async () => {
-        try {
-            const items = await bandcampApi.fetchCollection(20000, (added, soFar, total) => {
-                if (collectionView && !collectionView.webContents.isDestroyed()) {
-                    collectionView.webContents.send('collection:items', { items: added, soFar, total });
+        const sendItems = (added: any[], soFar: number, total: number) => {
+            if (collectionView && !collectionView.webContents.isDestroyed()) {
+                collectionView.webContents.send('collection:items', { items: mapCachedArt(added), soFar, total });
+            }
+        };
+        // cache-first: with the release cache on, the saved listing loads instantly
+        // and the network is only asked for purchases NEWER than the cache (the
+        // fancollection api pages newest-first, so we stop at the first known item).
+        // Reload therefore "checks for new ones" instead of re-scanning everything.
+        const cached = cacheReleasesOn() ? collectionItemsDisk.get() : [];
+        if (Array.isArray(cached) && cached.length) {
+            sendItems(cached, cached.length, cached.length);
+            try {
+                const known = new Set<string>(cached.map((c: any) => c.tralbumType + c.tralbumId));
+                const fresh = await bandcampApi.fetchCollection(20000, undefined, known);
+                if (devMode) console.log('[bcrpc] collection:fetch cache=' + cached.length + ' new=' + fresh.length);
+                if (fresh.length) {
+                    const total = cached.length + fresh.length;
+                    sendItems(fresh, total, total);
+                    collectionItemsDisk.replace([...fresh, ...cached]);
+                    return { ok: true, count: total };
                 }
-            });
+            } catch { /* cache alone is fine */ }
+            return { ok: true, count: cached.length, cached: true };
+        }
+        // no cache: full paginated fetch (and seed the cache if the setting is on)
+        try {
+            const items = await bandcampApi.fetchCollection(20000, sendItems);
             if (devMode) console.log('[bcrpc] collection:fetch ' + items.length + ' items');
-            return { ok: true, count: items.length };
+            if (items.length) {
+                if (cacheReleasesOn()) collectionItemsDisk.replace(items);
+                return { ok: true, count: items.length };
+            }
         } catch (err: any) {
             if (devMode) console.log('[bcrpc] collection:fetch FAILED ' + (err && (err.message || err)));
-            return { ok: false, count: 0, error: err?.message || 'fetch failed' };
         }
+        return { ok: false, count: 0, error: 'fetch failed' };
     });
 
     // resolve a collection item to a full tracklist. a purchased TRACK that's part
@@ -646,16 +890,22 @@ async function init() {
     };
 
     // play release chosen in custom view: resolve full tracklist & hand to player (bypasses page trap entirely)
-    ipcMain.handle('collection:play', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; activeIndex?: number; trackId?: string }) => {
+    ipcMain.handle('collection:play', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; activeIndex?: number; trackId?: string; trackOnly?: boolean }) => {
         try {
             const resolved = await resolveRelease(req);
-            const tracks = resolved.tracks;
+            let tracks = resolved.tracks;
             if (tracks.length && playerView && !playerView.webContents.isDestroyed()) {
                 // start at the chosen track (by id, else index) so the whole album
                 // becomes the queue with the rest of it queued behind
                 let active = typeof req.activeIndex === 'number' ? req.activeIndex : resolved.activeIndex;
                 if (req.trackId) { const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId)); if (i !== -1) active = i; }
                 active = Math.max(0, Math.min(active, tracks.length - 1));
+                // a single-track purchase plays JUST that track — resolving through
+                // the parent album is only for metadata, not to queue the whole thing
+                if (req.trackOnly) {
+                    tracks = [tracks[active]];
+                    active = 0;
+                }
                 trapSeq++; // supersede any in flight page trap
                 playerView.webContents.send('player:stream-incoming', {
                     queue: tracks, activeIndex: active, context: 'collection', format: 'raw',
@@ -676,9 +926,24 @@ async function init() {
             if (!tracks.length) return { ok: false, error: 'no tracks' };
             const year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req);
             if (year) persistYear(req.tralbumType, req.tralbumId, year);
+            // genre tags for the panel: from the release index when it has them
+            // (a collection item's fetch here also fills the persistent cache)
+            const k = (req.tralbumType === 't' ? 't' : 'a') + toIdStr(req.tralbumId);
+            const idxCache = releaseIndexDisk.get();
+            let tags: string[] = idxCache[k]?.g || sessionDetails.get(k)?.g || [];
+            if (!tags.length && !idxCache[k] && !sessionDetails.get(k)) {
+                const d = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: req.tralbumType === 't' ? 't' : 'a', bandId: req.bandId }, true);
+                if (d.ok) {
+                    tags = d.tags;
+                    const entry: IndexCacheEntry = { g: d.tags, t: d.tracks.map((t) => [t.title, t.duration] as [string, number]), y: d.year };
+                    if (d.about) entry.a = d.about;
+                    if (collectionKeys.has(k)) { idxCache[k] = entry; releaseIndexDisk.save(); }
+                    else sessionDetails.set(k, entry);
+                }
+            }
             const first = tracks[0];
             return {
-                ok: true, year,
+                ok: true, year, tags,
                 title: (first.album || first.title || '').toString(),
                 artist: first.artist, art: first.art,
                 tracks: tracks.map((t) => ({ id: t.id, title: t.title, artist: t.artist, duration: t.duration })),
@@ -692,7 +957,7 @@ async function init() {
     // them). cached to disk so it's a one-time cost. streams results back as they land.
     ipcMain.on('collection:enrich-years', async (_e, reqs: { tralbumId: string; tralbumType: TralbumType; bandId: string }[]) => {
         if (!Array.isArray(reqs) || !reqs.length) return;
-        const store2 = store.get('yearCache', {}) as Record<string, number>;
+        const store2 = yearsDisk.get();
         const send = (updates: { tralbumId: string; year: number }[]) => {
             if (updates.length && collectionView && !collectionView.webContents.isDestroyed()) {
                 collectionView.webContents.send('collection:years', updates);
@@ -716,18 +981,193 @@ async function init() {
                 let y = 0;
                 try { y = await bandcampApi.fetchReleaseYear(r); } catch { /* skip */ }
                 if (y) { store2[r.tralbumType + ':' + r.tralbumId] = y; pending.push({ tralbumId: r.tralbumId, year: y }); }
-                if (pending.length >= 25) { send(pending.splice(0)); store.set('yearCache', store2); }
+                if (pending.length >= 25) { send(pending.splice(0)); yearsDisk.save(); }
             }
         };
         await Promise.all([worker(), worker(), worker()]); // modest concurrency to avoid 429s
         send(pending.splice(0));
-        store.set('yearCache', store2);
+        yearsDisk.save();
         if (collectionView && !collectionView.webContents.isDestroyed()) collectionView.webContents.send('collection:years-done');
     });
 
+    // build the collection's release index (genre tags + tracklist per item) so
+    // search can match tags/track names & the list view can show every track.
+    // cached to disk so the tralbum fetches are a one-time cost; the same payload
+    // primes the year cache for free.
+    //
+    // pacing: bandcamp throttles bursts of tralbum reads hard (the previous
+    // 3-worker/no-delay version wedged at ~50 items of a 2300-item collection on
+    // 429s). requests are now strictly serialized with a delay between releases,
+    // 429s exponentially back off, and a run aborts after repeated hard failures —
+    // the cache resumes where it left off on the next reload/launch.
+    interface IndexRow { key: string; blob: string; tags: string[]; tracks: [string, number][] }
+    type IndexCacheEntry = { g: string[]; t: [string, number][]; y: number; a?: string };
+    const indexRowOf = (k: string, c: IndexCacheEntry): IndexRow => ({
+        key: k,
+        blob: ((c.g || []).join(' ') + ' ' + (c.t || []).map((x) => x[0]).join(' ')).toLowerCase().replace(/\s+/g, ' ').trim(),
+        tags: c.g || [],
+        tracks: c.t || [],
+    });
+    let indexRunActive = false;
+    // keys of releases actually in the user's collection: the ONLY ones whose
+    // details are persisted to disk (feed items etc. stay session-only).
+    const collectionKeys = new Set<string>();
+    // last request list (with art urls) so enabling the release cache in settings
+    // can kick off a cover mirror pass without waiting for the next index run
+    let lastIndexReqs: { tralbumId: string; tralbumType: TralbumType; bandId: string; art?: string }[] = [];
+    const idxAlive = () => collectionView && !collectionView.webContents.isDestroyed();
+    const idxSleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+    const sendIndexStatus = (text: string) => { if (idxAlive()) collectionView.webContents.send('collection:index-status', text); };
+
+    // mirror covers to disk (cdn fetches, light pacing). runs over all items so an
+    // index built before the setting was enabled still gets its covers.
+    let artPassActive = false;
+    const mirrorArt = async (reqs: typeof lastIndexReqs) => {
+        if (artPassActive || !cacheReleasesOn()) return;
+        artPassActive = true;
+        try {
+            for (const r of reqs) {
+                if (!idxAlive()) break;
+                const art = String(r.art || '');
+                if (!art.startsWith('https://')) continue;
+                const ap = artCachePath(r.tralbumType, r.tralbumId);
+                if (fs.existsSync(ap)) continue;
+                const buf = await bandcampApi.fetchBinary(art);
+                if (buf && buf.length) { try { fs.writeFileSync(ap, buf); } catch { /* disk */ } }
+                await idxSleep(60);
+            }
+        } finally {
+            artPassActive = false;
+        }
+    };
+
+    ipcMain.on('collection:enrich-index', async (_e, reqs: { tralbumId: string; tralbumType: TralbumType; bandId: string; art?: string }[]) => {
+        if (!Array.isArray(reqs) || !reqs.length || indexRunActive) return;
+        indexRunActive = true;
+        const cache = releaseIndexDisk.get();
+        // the request list IS the collection: remember it & evict anything else
+        // that leaked into the persistent cache (e.g. feed items opened earlier)
+        collectionKeys.clear();
+        for (const r of reqs) collectionKeys.add(r.tralbumType + toIdStr(r.tralbumId));
+        for (const k of Object.keys(cache)) { if (!collectionKeys.has(k)) delete cache[k]; }
+        lastIndexReqs = reqs;
+        const send = (rows: IndexRow[]) => { if (rows.length && idxAlive()) collectionView.webContents.send('collection:index', rows); };
+
+        const cached: IndexRow[] = [];
+        const todo: typeof reqs = [];
+        for (const r of reqs) {
+            const k = r.tralbumType + toIdStr(r.tralbumId);
+            if (cache[k]) cached.push(indexRowOf(k, cache[k]));
+            else todo.push(r);
+        }
+        send(cached);
+        // covers mirror concurrently (light cdn fetches) — previously this waited
+        // for the whole metadata crawl, so covers never cached on big collections
+        void mirrorArt(reqs);
+
+        // rest for a while, streaming a countdown into the toolbar indicator
+        const rest = async (seconds: number, why: string) => {
+            for (let left = seconds; left > 0 && idxAlive(); left -= 5) {
+                sendIndexStatus(`${why}, resuming in ${left}s`);
+                await idxSleep(Math.min(5, left) * 1000);
+            }
+            sendIndexStatus('');
+        };
+
+        // pacing: bandcamp's throttle punishes sustained crawls, not just bursts.
+        // work in chunks of 500 releases with a long rest between chunks, and when
+        // repeatedly 429'd mid-chunk take an immediate long rest instead of giving
+        // up (the old behavior stranded big collections partly indexed).
+        const CHUNK = 500;
+        const CHUNK_REST_S = 60;
+        const THROTTLE_REST_S = 120;
+        const MAX_RESTS = 30;
+        const pending: IndexRow[] = [];
+        let hardFails = 0;
+        let doneInChunk = 0;
+        let rests = 0;
+        try {
+            for (const r of todo) {
+                if (!idxAlive()) break;
+                // yield to user actions: an interactive fetch (tracklist click, feed
+                // page…) parks the crawl briefly so it never steals the 429 budget
+                while (bandcampApi.interactiveIdleMs() < 4000) await idxSleep(1500);
+                let info: { tags: string[]; tracks: { title: string; duration: number }[]; year: number; about: string } | null = null;
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const res = await bandcampApi.fetchSearchIndex(r);
+                    if (res.ok) { info = res; break; }
+                    if (!res.retryable) break;
+                    await idxSleep(1500 * Math.pow(2, attempt)); // 429: back off & retry
+                }
+                if (info) {
+                    hardFails = 0;
+                    const k = r.tralbumType + toIdStr(r.tralbumId);
+                    cache[k] = { g: info.tags, t: info.tracks.map((t) => [t.title, t.duration] as [string, number]), y: info.year };
+                    if (info.about) cache[k].a = info.about;
+                    if (info.year) persistYear(r.tralbumType, r.tralbumId, info.year);
+                    pending.push(indexRowOf(k, cache[k]));
+                    if (pending.length >= 10) { send(pending.splice(0)); releaseIndexDisk.save(); }
+                    doneInChunk++;
+                } else if (++hardFails >= 8) {
+                    // persistently throttled: take a long rest & carry on
+                    if (++rests > MAX_RESTS) { if (devMode) console.log('[bcrpc] enrich-index giving up for this session'); break; }
+                    hardFails = 0;
+                    send(pending.splice(0));
+                    releaseIndexDisk.save();
+                    await rest(THROTTLE_REST_S, 'throttled (429)');
+                    continue;
+                }
+                if (doneInChunk >= CHUNK) {
+                    doneInChunk = 0;
+                    if (++rests > MAX_RESTS) break;
+                    send(pending.splice(0));
+                    releaseIndexDisk.save();
+                    await rest(CHUNK_REST_S, 'chunk done');
+                }
+                await idxSleep(300); // pacing between releases
+            }
+        } finally {
+            send(pending.splice(0));
+            releaseIndexDisk.save();
+            sendIndexStatus('');
+            if (idxAlive()) collectionView.webContents.send('collection:index-done');
+            indexRunActive = false;
+        }
+    });
+
+    // release details (tags / tracklist / about) for the feed's expanded cards &
+    // anything else that wants them. collection releases are served from / added
+    // to the persistent index cache; anything else (feed items…) lives in a
+    // session-only cache so nothing outside the collection is written to disk.
+    const sessionDetails = new Map<string, IndexCacheEntry>();
+    ipcMain.handle('release:details', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string }) => {
+        const type: TralbumType = req.tralbumType === 't' ? 't' : 'a';
+        const k = type + toIdStr(req.tralbumId);
+        const cache = releaseIndexDisk.get();
+        let c = cache[k] || sessionDetails.get(k);
+        if (!c) {
+            // interactive: user is looking at the panel right now (crawler yields)
+            const res = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: type, bandId: req.bandId }, true);
+            if (res.ok) {
+                c = { g: res.tags, t: res.tracks.map((t) => [t.title, t.duration] as [string, number]), y: res.year };
+                if (res.about) c.a = res.about;
+                if (collectionKeys.has(k)) {
+                    cache[k] = c;
+                    releaseIndexDisk.save();
+                    if (res.year) persistYear(type, req.tralbumId, res.year);
+                } else {
+                    sessionDetails.set(k, c);
+                }
+            }
+        }
+        if (!c) return { ok: false };
+        return { ok: true, tags: c.g || [], tracks: c.t || [], about: c.a || '', year: c.y || 0 };
+    });
+
     // add a release chosen in the custom collection view to the queue (no interrupt).
-    // with trackId set, queue only that one song from the release's tracklist.
-    ipcMain.handle('collection:enqueue', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string }) => {
+    // with trackId (or trackIndex, e.g. from the list view whose rows carry no ids)
+    // set, queue only that one song from the release's tracklist.
+    ipcMain.handle('collection:enqueue', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
         try {
             const resolved = await resolveRelease(req);
             // for a purchased single track, queue just that track (not the whole album)
@@ -736,6 +1176,10 @@ async function init() {
                 : resolved.tracks;
             if (req.trackId) {
                 const one = resolved.tracks.find((t) => t.id === toIdStr(req.trackId));
+                if (!one) return { ok: false, error: 'track not found' };
+                tracks = [one];
+            } else if (typeof req.trackIndex === 'number' && req.trackIndex >= 0) {
+                const one = resolved.tracks[req.trackIndex];
                 if (!one) return { ok: false, error: 'track not found' };
                 tracks = [one];
             }
@@ -747,6 +1191,50 @@ async function init() {
         } catch (err: any) {
             return { ok: false, error: err?.message || 'enqueue failed' };
         }
+    });
+
+    // dragging a cover out of the collection grid exports the FULL-SIZE cover as
+    // a real file (native drag). CRITICAL: webContents.startDrag must be called
+    // SYNCHRONOUSLY while the drag gesture is live — awaiting a download first
+    // enters the OS drag loop with no active drag, which wedges/crashes the main
+    // process. so: hovering a card prefetches the full-size art to temp, the
+    // dragstart asks (sync) whether the file is ready, and only then hands the
+    // drag to us; otherwise the browser's default thumbnail drag proceeds.
+    const dragArtFile = (req: { title?: string; artist?: string }): string => {
+        const safe = (((req?.artist || '') + ' - ' + (req?.title || 'cover'))
+            .replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').slice(0, 80).trim()) || 'cover';
+        return path.join(app.getPath('temp'), 'bcrpc-art', safe + '.jpg');
+    };
+    const artPrefetching = new Set<string>();
+    ipcMain.on('collection:prefetch-art', async (_e, req: { art?: string; title?: string; artist?: string }) => {
+        try {
+            const file = dragArtFile(req);
+            if (fs.existsSync(file) || artPrefetching.has(file)) return;
+            const url = String(req?.art || '').replace(/_\d+\.jpg([?#].*)?$/, '_10.jpg'); // _10 = full size
+            if (!url.startsWith('https://')) return;
+            artPrefetching.add(file);
+            const buf = await bandcampApi.fetchBinary(url);
+            if (buf && buf.length) {
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(file, buf);
+            }
+        } catch { /* no prefetch, default drag will be used */ }
+        finally { artPrefetching.delete(dragArtFile(req)); }
+    });
+    ipcMain.on('collection:art-ready', (e, req: { title?: string; artist?: string }) => {
+        try {
+            const file = dragArtFile(req);
+            e.returnValue = fs.existsSync(file) ? file : '';
+        } catch { e.returnValue = ''; }
+    });
+    ipcMain.on('collection:drag-art', (e, file: unknown) => {
+        try {
+            if (typeof file !== 'string' || !file || !fs.existsSync(file)) return;
+            let icon = nativeImage.createFromPath(file);
+            if (!icon.isEmpty()) icon = icon.resize({ width: 128 });
+            else icon = nativeImage.createFromPath(path.join(__dirname, '../assets/bandcamp-button-circle-black-64.png'));
+            e.sender.startDrag({ file, icon });
+        } catch { /* drag just doesn't start */ }
     });
 
     // resolve a bandcamp release/track url to tracks & append to the queue. shared
@@ -888,6 +1376,24 @@ async function init() {
         return { ok: true, dir: res.filePaths[0] };
     });
 
+    // release cache: where covers are stored + how big everything is
+    ipcMain.handle('settings:choose-cache-dir', async () => {
+        const current = (store.get('cacheDir', '') as string) || app.getPath('userData');
+        const res = await dialog.showOpenDialog(settingsWindow || mainWindow, {
+            title: 'Choose release cache folder',
+            defaultPath: current,
+            properties: ['openDirectory', 'createDirectory'],
+        });
+        if (res.canceled || !res.filePaths.length) return { ok: false, dir: current };
+        store.set('cacheDir', res.filePaths[0]);
+        return { ok: true, dir: res.filePaths[0] };
+    });
+    ipcMain.handle('settings:cache-info', () => ({
+        dir: (store.get('cacheDir', '') as string) || app.getPath('userData'),
+        bytes: cacheSizeBytes(),
+    }));
+
+
     // settings + last.fm auth bridge
     ipcMain.on('settings:log', (_e, msg: unknown) => { if (devMode) console.log('[bcrpc:settings] ' + String(msg)); });
     ipcMain.handle('settings:get', () => {
@@ -898,9 +1404,12 @@ async function init() {
             discordClientId: store.get('discordClientId', ''),
             closeToTray: store.get('closeToTray', true),
             autoLoadCollection: store.get('autoLoadCollection', false) === true,
+            cacheReleases: cacheReleasesOn(),
+            gridHeaders: store.get('gridHeaders', false) === true,
             downloadDir: getDownloadDir(),
             theme: getTheme(),
             darkArtistPages: store.get('darkArtistPages', false) === true,
+            discordOpts: presenceService.options(),
         };
     });
 
@@ -915,6 +1424,22 @@ async function init() {
                 presenceService.reconnect(); // apply new app id now
             }
             if (typeof data.autoLoadCollection === 'boolean') store.set('autoLoadCollection', data.autoLoadCollection);
+            if (typeof data.cacheReleases === 'boolean') {
+                const wasOn = cacheReleasesOn();
+                store.set('cacheReleases', data.cacheReleases);
+                // freshly enabled: start mirroring covers now (not on the next boot)
+                if (data.cacheReleases && !wasOn && lastIndexReqs.length) void mirrorArt(lastIndexReqs);
+            }
+            if (typeof data.gridHeaders === 'boolean') {
+                store.set('gridHeaders', data.gridHeaders);
+                if (collectionView && !collectionView.webContents.isDestroyed()) {
+                    collectionView.webContents.send('collection:grid-headers', data.gridHeaders);
+                }
+            }
+            if (data.discordOpts && typeof data.discordOpts === 'object') {
+                if (typeof data.discordOpts.showWhenPaused === 'boolean') store.set('discordShowWhenPaused', data.discordOpts.showWhenPaused);
+                presenceService.refresh(); // re-send the live activity with new options
+            }
             let themeChanged = false;
             if (typeof data.theme === 'string') {
                 const next = data.theme === 'light' ? 'light' : 'dark';
@@ -1038,10 +1563,33 @@ async function init() {
         wc.on('did-navigate-in-page', onNav);
         wc.on('page-title-updated', onNav);
 
+        // failsafe against the grey-page hang: the dark cloak hides the body until
+        // darkreader paints; if darkreader never initializes (script error, redirect
+        // race like ?from=menubar hops, bfcache restores), the page stayed an empty
+        // grey forever. after a few seconds, if nothing painted, drop the user-origin
+        // cloak AND force the body visible — worst case is a brief unthemed flash.
+        const liftCloakIfStuck = () => {
+            setTimeout(() => {
+                if (wc.isDestroyed()) return;
+                wc.executeJavaScript('!!document.documentElement.getAttribute("data-darkreader-scheme")')
+                    .then((painted: boolean) => {
+                        if (painted || wc.isDestroyed()) return;
+                        if (themeForUrl(wc.getURL()) !== 'light') {
+                            const key = antiFlashKeys.get(wc);
+                            if (key) { wc.removeInsertedCSS(key).catch(() => {}); antiFlashKeys.delete(wc); }
+                        }
+                        wc.executeJavaScript(
+                            '(function(){var s=document.createElement("style");s.textContent="body{opacity:1 !important}";(document.head||document.documentElement).appendChild(s);})()'
+                        ).catch(() => {});
+                    }).catch(() => {});
+            }, 4000);
+        };
+
         // dark theme once the dom is ready
         wc.on('dom-ready', async () => {
             try {
                 await wc.insertCSS(SEARCHBOX_CSS);
+                liftCloakIfStuck(); // arm the de-grey failsafe on every load path
                 if (themeForUrl(wc.getURL()) === 'light') return; // no darkreader in light mode / on exempt artist pages
                 await wc.executeJavaScript(`
                     (function() {
@@ -1070,8 +1618,10 @@ async function init() {
             try {
                 const prev = antiFlashKeys.get(wc);
                 if (prev) await wc.removeInsertedCSS(prev).catch(() => {});
-                const key = await wc.insertCSS(themeForUrl(wc.getURL()) === 'light' ? LIGHT_CSS : ANTI_FLASH_CSS, { cssOrigin: 'user' });
+                const isLight = themeForUrl(wc.getURL()) === 'light';
+                const key = await wc.insertCSS(isLight ? LIGHT_CSS : ANTI_FLASH_CSS, { cssOrigin: 'user' });
                 antiFlashKeys.set(wc, key);
+                if (!isLight) liftCloakIfStuck();
             } catch (err) { console.error('Failed to inject Pre-Theme CSS:', err); }
         });
 
@@ -1106,6 +1656,7 @@ async function init() {
         }
         mainWindow.addBrowserView(tab.view);
         if (collectionVisible && collectionView) mainWindow.setTopBrowserView(collectionView);
+        if (feedVisible && feedView) mainWindow.setTopBrowserView(feedView);
         mainWindow.setTopBrowserView(headerView);
         mainWindow.setTopBrowserView(playerView);
         adjustContentViews();
@@ -1192,4 +1743,8 @@ async function init() {
 }
 
 app.whenReady().then(init);
-app.on('before-quit', () => isQuitting = true);
+app.on('before-quit', () => {
+    isQuitting = true;
+    // make sure debounced cache writes hit disk before the process dies
+    try { releaseIndexDisk?.flush(); collectionItemsDisk?.flush(); yearsDisk?.flush(); } catch { /* disk */ }
+});
