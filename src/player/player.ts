@@ -297,6 +297,13 @@ function runHotkey(cmd: string): void {
     else if (cmd === 'seek-fwd') doSeekBy(5);
     else if (cmd === 'vol-up') doVolBy(0.05);
     else if (cmd === 'vol-down') doVolBy(-0.05);
+    else if (cmd.startsWith('seek-pct-')) {
+        const n = Number(cmd.slice(9));
+        if (queue.current() && audio.duration && n >= 0 && n <= 9) {
+            audio.currentTime = audio.duration * (n / 10);
+            emitNowPlaying(true);
+        }
+    }
 }
 ipcRenderer.on('player:hotkey', (_e, cmd: unknown) => runHotkey(String(cmd || '')));
 
@@ -314,6 +321,8 @@ function mediaHotkeyOf(e: KeyboardEvent): string {
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 }
 document.addEventListener('keydown', (e) => {

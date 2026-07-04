@@ -140,6 +140,8 @@ const mediaHotkeyOf = (e: KeyboardEvent): string => {
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 };
 document.addEventListener('keydown', (e) => {

@@ -54,7 +54,10 @@ async function load(): Promise<void> {
     } finally {
         ipcRenderer.removeListener('collection:items', onItems);
         loading = false;
-        if (items.length) updateHeaderCount();
+        if (items.length) {
+            updateHeaderCount();
+            requestIndex(); // tags + track titles for search (disk-cached after first run)
+        }
     }
 }
 
@@ -62,7 +65,11 @@ function sortedFiltered(): CollectionItem[] {
     const q = searchEl.value.trim().toLowerCase();
     const key = sortEl.value;
     let list = items;
-    if (q) list = list.filter((i) => (i.artist + ' ' + i.title).toLowerCase().includes(q));
+    // match artist/title always; genre tags & track titles once the search index
+    // (built in the background, cached on disk) has that item
+    if (q) list = list.filter((i) =>
+        (i.artist + ' ' + i.title).toLowerCase().includes(q) ||
+        (searchIndex.get(i.tralbumType + i.tralbumId) || '').includes(q));
     const cmp = (a: CollectionItem, b: CollectionItem): number => {
         if (key === 'artist') return a.artist.localeCompare(b.artist) || a.title.localeCompare(b.title);
         if (key === 'title') return a.title.localeCompare(b.title);
@@ -78,8 +85,30 @@ function updateHeaderCount(): void {
     const list = sortedFiltered();
     const total = list.length === items.length ? '' : ' / ' + items.length;
     const progress = loading ? ` — loading… ${expected ? items.length + ' / ' + expected : items.length}` : '';
-    countEl.textContent = list.length + total + ' releases' + progress;
+    const idxNote = indexing ? ` — indexing tags & tracks… ${searchIndex.size} / ${items.length}` : '';
+    countEl.textContent = list.length + total + ' releases' + progress + idxNote;
 }
+
+// search index (genre tags + track titles per item), built by main in the
+// background & streamed in. lets the search box match tags and song names.
+const searchIndex = new Map<string, string>();
+let indexRequested = false;
+let indexing = false;
+function requestIndex(): void {
+    if (indexRequested || !items.length) return;
+    indexRequested = true;
+    indexing = true;
+    ipcRenderer.send('collection:enrich-index',
+        items.map((i) => ({ tralbumId: i.tralbumId, tralbumType: i.tralbumType, bandId: i.bandId })));
+    updateHeaderCount();
+}
+ipcRenderer.on('collection:index', (_e, rows: { key: string; blob: string }[]) => {
+    for (const r of rows || []) searchIndex.set(r.key, r.blob || '');
+    // an active tag/track search refines live as index entries arrive
+    if (searchEl.value.trim()) forceRender();
+    else updateHeaderCount();
+});
+ipcRenderer.on('collection:index-done', () => { indexing = false; updateHeaderCount(); });
 
 // Generates a single DOM node for an album card
 function createCard(it: CollectionItem): HTMLElement {
@@ -326,6 +355,8 @@ function mediaHotkeyOf(e: KeyboardEvent): string {
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 }
 document.addEventListener('keydown', (e) => {

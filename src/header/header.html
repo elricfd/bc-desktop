@@ -197,6 +197,9 @@
 <div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
 
 <div class="window-controls">
+    <button id="btn-feed" title="Your feed" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4a16 16 0 0 1 16 16h-3A13 13 0 0 0 4 7V4zm0 6a10 10 0 0 1 10 10h-3a7 7 0 0 0-7-7v-3zm2 6.5A1.5 1.5 0 1 1 4.5 18 1.5 1.5 0 0 1 6 16.5z"/></svg>
+    </button>
     <button id="btn-collection" title="Your collection" type="button">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z"/></svg>
     </button>
@@ -226,6 +229,10 @@
     const btnCollection = document.getElementById('btn-collection');
     btnCollection.onclick = () => ipcRenderer.send('collection:toggle');
     ipcRenderer.on('collection:state', (_e, open) => { btnCollection.style.color = open ? '#1da0c3' : ''; });
+
+    const btnFeed = document.getElementById('btn-feed');
+    btnFeed.onclick = () => ipcRenderer.send('feed:toggle');
+    ipcRenderer.on('feed:state', (_e, open) => { btnFeed.style.color = open ? '#1da0c3' : ''; });
 
     // tabs: render chips only when >1 tab (so the url bar stays full otherwise)
     document.getElementById('btn-newtab').onclick = () => ipcRenderer.send('tab:new');
@@ -283,6 +290,8 @@
         if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
         if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
         if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
+        // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
         return '';
     }
     document.addEventListener('keydown', (e) => {

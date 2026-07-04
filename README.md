@@ -45,6 +45,7 @@ npm run build
 - `←` / `→`: Scrub 5 seconds back / forward - hold the key to keep scrubbing
 - `Shift + ←` / `Shift + →`: Previous / next track (previous restarts the current song if you're past the 3-second mark)
 - `Shift + ↑` / `Shift + ↓`: Volume up / down
+- `0`–`9`: Seek to that percentage of the track (`5` jumps to 50%)
 
 **Other**:
 
