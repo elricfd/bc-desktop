@@ -290,21 +290,21 @@ const LIST_CHUNK = Number.MAX_SAFE_INTEGER;
 type ListSortKey = 'num' | 'artist' | 'title' | 'album' | 'year' | 'genre' | 'time';
 let listSort: { key: ListSortKey; desc: boolean } = { key: 'artist', desc: false };
 
-function primaryGenre(r: ListRow): string {
-    if (!r.it) return '';
-    const idx = searchIndex.get(r.it.tralbumType + r.it.tralbumId);
-    return idx && idx.tags.length ? idx.tags[0] : '';
-}
 
-// grouped sorts (genre / artist / album / year) render a header row per group;
-// this returns the row's group label for the active sort, or '' for flat sorts.
-function groupLabelOf(r: ListRow): string {
-    if (!r.it) return '';
-    if (listSort.key === 'genre') return primaryGenre(r) || '(no genre)';
-    if (listSort.key === 'artist') return r.it.artist || '(unknown artist)';
-    if (listSort.key === 'album') return r.it.title || '(unknown album)';
-    if (listSort.key === 'year') return r.it.year ? String(r.it.year) : '(unknown year)';
-    return '';
+// grouped sorts (genre / artist / album / year) render a header row per group.
+// genre rows belong to EVERY tag on their release (so a release shows under
+// each of its genres, duplicated); the others have exactly one group.
+function groupLabelsOf(r: ListRow): string[] {
+    if (!r.it) return [];
+    if (listSort.key === 'genre') {
+        const idx = searchIndex.get(r.it.tralbumType + r.it.tralbumId);
+        const tags = (idx?.tags || []).map((t) => t.trim()).filter(Boolean);
+        return tags.length ? tags : ['(no genre)'];
+    }
+    if (listSort.key === 'artist') return [r.it.artist || '(unknown artist)'];
+    if (listSort.key === 'album') return [r.it.title || '(unknown album)'];
+    if (listSort.key === 'year') return [r.it.year ? String(r.it.year) : '(unknown year)'];
+    return [];
 }
 const GROUPED_KEYS: ListSortKey[] = ['genre', 'artist', 'album', 'year'];
 
@@ -316,14 +316,16 @@ function applyListSort(rows: ListRow[]): ListRow[] {
 
     if (GROUPED_KEYS.includes(listSort.key)) {
         // bucket rows by group, order groups alphabetically (years numerically),
-        // and emit a header row announcing each group; unknowns always last
+        // and emit a header row announcing each group; unknowns always last.
+        // genre buckets a row under EVERY tag of its release (duplicates intended).
         const groups = new Map<string, { label: string; rows: ListRow[] }>();
         for (const r of rows) {
-            const label = groupLabelOf(r);
-            const k = label.toLowerCase();
-            let g = groups.get(k);
-            if (!g) { g = { label, rows: [] }; groups.set(k, g); }
-            g.rows.push(r);
+            for (const label of groupLabelsOf(r)) {
+                const k = label.toLowerCase();
+                let g = groups.get(k);
+                if (!g) { g = { label, rows: [] }; groups.set(k, g); }
+                g.rows.push(r);
+            }
         }
         const isUnknown = (n: string) => n.startsWith('(');
         const names = [...groups.keys()].filter((n) => !isUnknown(n)).sort((a, b) =>

@@ -570,6 +570,49 @@ export class BandcampApi {
         return this.cachedFanId;
     }
 
+    private cachedFanUsername = '';
+    /** the fan's bandcamp username (for the /<name>/feed page url). */
+    private async getFanUsername(): Promise<string> {
+        if (this.cachedFanUsername) return this.cachedFanUsername;
+        const session = this.getSession();
+        if (!session) return '';
+        try {
+            const r = await session.fetch('https://bandcamp.com/api/fan/2/collection_summary', { credentials: 'include' } as any);
+            if (r.ok) {
+                const d: any = await r.json();
+                const direct = String(d?.username || d?.fan_username || d?.collection_summary?.username || '').trim();
+                if (direct) { this.cachedFanUsername = direct; return direct; }
+                const url = String(d?.url || d?.trackpipe_url || d?.collection_summary?.url || '');
+                const m = url.match(/bandcamp\.com\/([^/?#]+)/i);
+                if (m) { this.cachedFanUsername = m[1]; return m[1]; }
+            }
+        } catch { /* try the redirect below */ }
+        // last resort: bandcamp redirects /feed to the logged-in fan's feed page
+        try {
+            const r = await session.fetch('https://bandcamp.com/feed', { credentials: 'include' } as any);
+            const m = String((r as any).url || '').match(/bandcamp\.com\/([^/?#]+)\/feed/i);
+            if (m) this.cachedFanUsername = m[1];
+        } catch { /* unknown */ }
+        return this.cachedFanUsername;
+    }
+
+    /**
+     * bandcamp's dash feed is a stored SNAPSHOT that only regenerates when the
+     * fan's feed page is actually visited — fan_dash_feed_updates just reads it.
+     * without this poke the feed ended at whenever the user last opened
+     * bandcamp's own feed page (newer releases simply weren't in the snapshot).
+     */
+    private async regenerateFeed(): Promise<void> {
+        const session = this.getSession();
+        if (!session) return;
+        try {
+            const name = await this.getFanUsername();
+            const url = name ? `https://bandcamp.com/${encodeURIComponent(name)}/feed` : 'https://bandcamp.com/feed';
+            const r = await session.fetch(url, { credentials: 'include' } as any);
+            await r.text(); // consume — the page visit itself triggers regeneration
+        } catch { /* snapshot stays stale; updates endpoint still works */ }
+    }
+
     /** normalize one feed story entry (fields vary between story types & api versions). */
     private normalizeStory(s: any): FeedStory | null {
         if (!s || typeof s !== 'object') return null;
@@ -605,6 +648,8 @@ export class BandcampApi {
         const fanId = await this.getFanId();
         if (!fanId) return { ok: false, stories: [], oldest: 0, error: 'not logged in' };
         this.noteInteractive(); // feed paging is user-driven: crawler yields to it
+        // first page of a load/reload: poke the feed page so the snapshot is fresh
+        if (!(olderThan > 0)) await this.regenerateFeed();
         let data: any = null;
         try {
             const body = new URLSearchParams({
@@ -643,6 +688,60 @@ export class BandcampApi {
         const rootOldest = Number(root.oldest_story_date) || 0;
         if (rootOldest && (!oldest || rootOldest < oldest)) oldest = rootOldest;
         return { ok: true, stories, oldest };
+    }
+
+    // --- global search (bandcamp's public search api) -------------------------
+
+    /**
+     * site-wide search via bandcamp's own public endpoint (the one their search
+     * box uses). filter: '' all, 't' tracks, 'a' albums, 'b' artists/labels.
+     */
+    async searchPublic(text: string, filter: '' | 't' | 'a' | 'b' = ''): Promise<{
+        ok: boolean;
+        results: { type: string; id: string; name: string; band: string; album: string; art: string; url: string; bandId: string; albumId: string }[];
+        error?: string;
+    }> {
+        const session = this.getSession();
+        if (!session || !text.trim()) return { ok: false, results: [], error: 'no query' };
+        this.noteInteractive(); // user-driven: the index crawler yields
+        try {
+            const r = await session.fetch('https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ search_text: text.trim(), search_filter: filter, full_page: true, fan_id: null }),
+                credentials: 'include',
+            } as any);
+            if (!r.ok) { this.notify429(r.status); return { ok: false, results: [], error: 'http ' + r.status }; }
+            const d: any = await r.json();
+            const rows: any[] = d?.auto?.results || d?.results || [];
+            return {
+                ok: true,
+                results: rows.map((x: any) => {
+                    // the api's `img` field uses the no-prefix image-id form, which
+                    // only exists for band/fan photos — for tracks/albums it 404s
+                    // (dead icons). release art must be built from art_id with the
+                    // `a` prefix.
+                    const artId = toId(x.art_id);
+                    const isRelease = x.type === 't' || x.type === 'a';
+                    const art = isRelease
+                        ? (artId ? `https://f4.bcbits.com/img/a${artId}_9.jpg` : String(x.img || '').trim())
+                        : (String(x.img || '').trim() || (artId ? `https://f4.bcbits.com/img/a${artId}_9.jpg` : ''));
+                    return {
+                        type: String(x.type || ''),
+                        id: toId(x.id),
+                        name: String(x.name || '').trim(),
+                        band: String(x.band_name || '').trim(),
+                        album: String(x.album_name || '').trim(),
+                        art,
+                        url: String(x.item_url_path || x.item_url_root || '').trim(),
+                        bandId: toId(x.band_id),
+                        albumId: toId(x.album_id),
+                    };
+                }).filter((x: any) => x.name),
+            };
+        } catch (e: any) {
+            return { ok: false, results: [], error: e?.message || 'search failed' };
+        }
     }
 
     // --- downloads (purchased items) ----------------------------------------

@@ -197,6 +197,9 @@
 <div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
 
 <div class="window-controls">
+    <button id="btn-gsearch" title="Search all of Bandcamp" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.2 5.2" stroke-linecap="round"/></svg>
+    </button>
     <button id="btn-feed" title="Your feed" type="button">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4a16 16 0 0 1 16 16h-3A13 13 0 0 0 4 7V4zm0 6a10 10 0 0 1 10 10h-3a7 7 0 0 0-7-7v-3zm2 6.5A1.5 1.5 0 1 1 4.5 18 1.5 1.5 0 0 1 6 16.5z"/></svg>
     </button>
@@ -233,6 +236,28 @@
     const btnFeed = document.getElementById('btn-feed');
     btnFeed.onclick = () => ipcRenderer.send('feed:toggle');
     ipcRenderer.on('feed:state', (_e, open) => { btnFeed.style.color = open ? '#1da0c3' : ''; });
+
+    const btnGsearch = document.getElementById('btn-gsearch');
+    btnGsearch.onclick = () => ipcRenderer.send('gsearch:toggle');
+    ipcRenderer.on('gsearch:state', (_e, open) => { btnGsearch.style.color = open ? '#1da0c3' : ''; });
+
+    // window bar customization (settings): show/hide individual controls.
+    // min/max/close/settings are never optional.
+    function applyHeaderButtons(cfg) {
+        if (!cfg || typeof cfg !== 'object') return;
+        const show = (el, on, disp) => { if (el) el.style.display = on ? (disp || '') : 'none'; };
+        show(document.getElementById('btn-home'), cfg.home === true, 'flex'); // css-hidden by default
+        show(document.getElementById('btn-back'), cfg.back !== false);
+        show(document.getElementById('btn-forward'), cfg.forward !== false);
+        show(document.getElementById('btn-newtab'), cfg.newtab !== false);
+        show(document.querySelector('.urlwrap'), cfg.urlbar !== false);
+        show(document.getElementById('btn-reload'), cfg.reload !== false);
+        show(btnGsearch, cfg.gsearch !== false);
+        show(btnCollection, cfg.collection !== false);
+        show(btnFeed, cfg.feed !== false);
+    }
+    ipcRenderer.on('header:buttons', (_e, cfg) => applyHeaderButtons(cfg));
+    ipcRenderer.invoke('settings:get').then((s) => applyHeaderButtons(s && s.headerButtons)).catch(() => {});
 
     // tabs: render chips only when >1 tab (so the url bar stays full otherwise)
     document.getElementById('btn-newtab').onclick = () => ipcRenderer.send('tab:new');

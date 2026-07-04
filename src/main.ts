@@ -161,6 +161,8 @@ let collectionView: BrowserView;
 let collectionVisible = false;
 let feedView: BrowserView;
 let feedVisible = false;
+let searchView: BrowserView;
+let searchVisible = false;
 
 interface Tab { id: number; view: BrowserView; title: string; }
 let tabs: Tab[] = [];
@@ -229,6 +231,7 @@ function adjustContentViews() {
     // collection / feed views (added only while open) fill the content area
     if (collectionView && collectionVisible) collectionView.setBounds(contentRect);
     if (feedView && feedVisible) feedView.setBounds(contentRect);
+    if (searchView && searchVisible) searchView.setBounds(contentRect);
 }
 
 function setupTray() {
@@ -282,6 +285,15 @@ function closeFeed() {
     if (feedVisible && feedView) mainWindow.removeBrowserView(feedView);
     feedVisible = false;
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('feed:state', false);
+}
+
+// hide the global search overlay. results are session junk — tell the view to
+// wipe them so nothing from a search lingers around.
+function closeSearch() {
+    if (searchVisible && searchView) mainWindow.removeBrowserView(searchView);
+    searchVisible = false;
+    if (searchView && !searchView.webContents.isDestroyed()) searchView.webContents.send('gsearch:hidden');
+    if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', false);
 }
 
 // external (non-bandcamp) hosts artists link to that should pop a separate window
@@ -340,6 +352,17 @@ function themeForUrl(url: string): 'dark' | 'light' {
 // opt-in on-disk release cache: covers + the release index (tracklists, tags,
 // album info) + the collection listing itself. audio is never cached.
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
+// which window-bar controls are visible (min/max/close/settings are not optional).
+// home defaults hidden (long-standing preference); everything else shown.
+const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: true, urlbar: true, reload: true, gsearch: true, collection: true, feed: true } as const;
+function getHeaderButtons(): Record<string, boolean> {
+    const saved = store.get('headerButtons', {}) as Record<string, boolean>;
+    const out: Record<string, boolean> = {};
+    for (const k of Object.keys(HEADER_BUTTON_DEFAULTS)) {
+        out[k] = typeof saved[k] === 'boolean' ? saved[k] : (HEADER_BUTTON_DEFAULTS as any)[k];
+    }
+    return out;
+}
 // covers live under the user-chosen cache location (settings), else app data
 function artCacheDir(): string {
     const custom = store.get('cacheDir', '') as string;
@@ -494,6 +517,11 @@ async function init() {
         webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode }
     });
     feedView.setBackgroundColor('#181a1b');
+
+    searchView = new BrowserView({
+        webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode }
+    });
+    searchView.setBackgroundColor('#181a1b');
     if (devMode) {
         feedView.webContents.on('did-fail-load', (_e, code, desc, url) =>
             console.log('[bcrpc] feed view FAILED ' + code + ' ' + desc + ' ' + url));
@@ -508,6 +536,7 @@ async function init() {
 
     collectionView.webContents.loadFile(path.join(__dirname, 'collection', 'collection.html'));
     feedView.webContents.loadFile(path.join(__dirname, 'feed', 'feed.html'));
+    searchView.webContents.loadFile(path.join(__dirname, 'search', 'search.html'));
 
     // opt-in (settings, off by default): pre-fetch the collection in the background
     // right after startup so opening the view is instant. small delay so the fetch
@@ -755,6 +784,7 @@ async function init() {
     ipcMain.on('app:home', () => {
         closeCollection();
         closeFeed();
+        closeSearch();
         hardLoad('https://bandcamp.com');
     });
 
@@ -764,6 +794,7 @@ async function init() {
         if (typeof url === 'string' && url.startsWith('https://')) {
             closeCollection();
             closeFeed();
+            closeSearch();
             hardLoad(url);
         }
     });
@@ -784,7 +815,7 @@ async function init() {
     ipcMain.on('collection:toggle', () => {
         collectionVisible = !collectionVisible;
         if (collectionVisible) {
-            closeFeed(); // one overlay at a time
+            closeFeed(); closeSearch(); // one overlay at a time
             mainWindow.addBrowserView(collectionView);
             mainWindow.setTopBrowserView(headerView); // keep header/player above it
             mainWindow.setTopBrowserView(playerView);
@@ -805,7 +836,7 @@ async function init() {
     ipcMain.on('feed:toggle', () => {
         feedVisible = !feedVisible;
         if (feedVisible) {
-            closeCollection(); // one overlay at a time
+            closeCollection(); closeSearch(); // one overlay at a time
             mainWindow.addBrowserView(feedView);
             mainWindow.setTopBrowserView(headerView); // keep header/player above it
             mainWindow.setTopBrowserView(playerView);
@@ -825,6 +856,31 @@ async function init() {
         const res = await bandcampApi.fetchFeed(Number(olderThan) || 0);
         if (devMode) console.log('[bcrpc] feed:fetch older=' + olderThan + ' -> ' + res.stories.length + (res.error ? ' err=' + res.error : ''));
         return res;
+    });
+
+    // global bandcamp search view
+    ipcMain.on('gsearch:log', (_e, msg: unknown) => { if (devMode) console.log('[bcrpc:gsearch] ' + String(msg)); });
+    ipcMain.on('gsearch:toggle', () => {
+        searchVisible = !searchVisible;
+        if (searchVisible) {
+            closeCollection(); closeFeed(); // one overlay at a time
+            mainWindow.addBrowserView(searchView);
+            mainWindow.setTopBrowserView(headerView);
+            mainWindow.setTopBrowserView(playerView);
+            adjustContentViews();
+            searchView.webContents.send('gsearch:shown');
+        } else {
+            mainWindow.removeBrowserView(searchView);
+            searchView.webContents.send('gsearch:hidden'); // wipe results & query
+        }
+        if (headerView && !headerView.webContents.isDestroyed()) {
+            headerView.webContents.send('gsearch:state', searchVisible);
+        }
+    });
+    ipcMain.on('gsearch:close', () => closeSearch());
+    ipcMain.handle('gsearch:query', async (_e, req: { text?: string; filter?: string }) => {
+        const f = (req?.filter === 't' || req?.filter === 'a' || req?.filter === 'b') ? req.filter : '';
+        return bandcampApi.searchPublic(String(req?.text || ''), f as any);
     });
 
     // fetch fan whole collection (paginated) for custom view; stream running count back so the view can show load progress on big collections
@@ -1271,7 +1327,7 @@ async function init() {
     };
     // per-view did-navigate bindings live in wireContentView; on header (re)load
     // resync the url bar and tab strip so they aren't blank
-    headerView.webContents.on('did-finish-load', () => { pushUrl(); sendTabsState(); });
+    headerView.webContents.on('did-finish-load', () => { pushUrl(); sendTabsState(); headerView.webContents.send('header:buttons', getHeaderButtons()); });
 
     // lazily resolve stream url for queued track (collection items only ship metadata; actual stream fetched on demand from tralbum api)
     ipcMain.handle('player:resolve-stream', async (_e, req: ResolveStreamRequest): Promise<ResolveStreamResponse> => {
@@ -1406,6 +1462,7 @@ async function init() {
             autoLoadCollection: store.get('autoLoadCollection', false) === true,
             cacheReleases: cacheReleasesOn(),
             gridHeaders: store.get('gridHeaders', false) === true,
+            headerButtons: getHeaderButtons(),
             downloadDir: getDownloadDir(),
             theme: getTheme(),
             darkArtistPages: store.get('darkArtistPages', false) === true,
@@ -1429,6 +1486,16 @@ async function init() {
                 store.set('cacheReleases', data.cacheReleases);
                 // freshly enabled: start mirroring covers now (not on the next boot)
                 if (data.cacheReleases && !wasOn && lastIndexReqs.length) void mirrorArt(lastIndexReqs);
+            }
+            if (data.headerButtons && typeof data.headerButtons === 'object') {
+                const clean: Record<string, boolean> = {};
+                for (const k of Object.keys(HEADER_BUTTON_DEFAULTS)) {
+                    if (typeof data.headerButtons[k] === 'boolean') clean[k] = data.headerButtons[k];
+                }
+                store.set('headerButtons', { ...getHeaderButtons(), ...clean });
+                if (headerView && !headerView.webContents.isDestroyed()) {
+                    headerView.webContents.send('header:buttons', getHeaderButtons());
+                }
             }
             if (typeof data.gridHeaders === 'boolean') {
                 store.set('gridHeaders', data.gridHeaders);
@@ -1657,6 +1724,7 @@ async function init() {
         mainWindow.addBrowserView(tab.view);
         if (collectionVisible && collectionView) mainWindow.setTopBrowserView(collectionView);
         if (feedVisible && feedView) mainWindow.setTopBrowserView(feedView);
+        if (searchVisible && searchView) mainWindow.setTopBrowserView(searchView);
         mainWindow.setTopBrowserView(headerView);
         mainWindow.setTopBrowserView(playerView);
         adjustContentViews();

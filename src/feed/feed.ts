@@ -157,7 +157,20 @@ async function togglePanel(s: FeedStory, card: HTMLElement): Promise<void> {
     const tracksEl = panel.querySelector('.fdtracks') as HTMLElement;
     if (!res || !res.ok) { tracksEl.innerHTML = '<div class="fdstate">couldn\'t load the details</div>'; return; }
 
-    tagsEl.innerHTML = (res.tags || []).map((t) => `<span class="fdtag">${escapeHtml(t)}</span>`).join('');
+    // tag chips open that tag's discover page on bandcamp (e.g. /discover/experimental)
+    tagsEl.innerHTML = '';
+    for (const t of res.tags || []) {
+        const chip = document.createElement('span');
+        chip.className = 'fdtag';
+        chip.textContent = t;
+        chip.title = 'Browse "' + t + '" on Bandcamp';
+        chip.style.cursor = 'pointer';
+        chip.addEventListener('click', () => {
+            const norm = t.trim().toLowerCase().replace(/\s+/g, '-');
+            ipcRenderer.send('app:navigate', 'https://bandcamp.com/discover/' + encodeURIComponent(norm));
+        });
+        tagsEl.appendChild(chip);
+    }
     if (res.about) { aboutEl.style.display = 'block'; aboutEl.textContent = res.about; }
 
     const tracks = res.tracks || [];
