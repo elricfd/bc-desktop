@@ -313,12 +313,17 @@ ipcRenderer.on('player:hotkey', (_e, cmd: unknown) => runHotkey(String(cmd || ''
 function mediaHotkeyOf(e: KeyboardEvent): string {
     const t = e.target as HTMLElement | null;
     const tag = t ? t.tagName : '';
-    if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+    // a focused seek/volume slider is an INPUT, but it takes no text: keep its
+    // native arrow-key scrubbing (deliberate) while space & digits still work
+    const isRange = tag === 'INPUT' && (t as HTMLInputElement).type === 'range';
+    if (t && !isRange && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
     const space = e.key === ' ' || e.code === 'Space';
     if (space && tag === 'BUTTON') return ''; // let a focused button click natively
     if (space) return 'toggle';
-    if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
-    if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
+    // focused slider: PLAIN arrows stay native (that's the click-then-scrub flow),
+    // but shift+arrows are still ours — track skip & volume work everywhere
+    if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : (isRange ? '' : 'seek-back');
+    if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : (isRange ? '' : 'seek-fwd');
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
     // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
