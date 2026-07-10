@@ -34,8 +34,22 @@
         .st.progressing { color: #1da0c3; }
         .st.interrupted, .st.cancelled { color: #d66; }
         .track { flex: 1; height: 4px; background: #2a2e30; border-radius: 2px; overflow: hidden; }
-        .track > div { height: 100%; background: #1da0c3; border-radius: 2px; }
+        .track > div { height: 100%; background: #1da0c3; border-radius: 2px; transition: width 0.2s ease; }
         .state { padding: 30px 12px; color: #848079; font-size: 12px; text-align: center; }
+        .cancel-btn {
+            background: transparent; color: #d66; border: none; font-size: 13px;
+            cursor: pointer; margin-left: 8px; font-weight: bold;
+        }
+        .cancel-btn:hover { color: #f88; }
+        
+        .footer {
+            padding: 12px; border-top: 1px solid #2a2e30;
+            display: flex; align-items: center; gap: 10px; background: #151718;
+            flex-shrink: 0;
+        }
+        .f-text { flex: 1; font-size: 11px; color: #848079; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .f-track { flex: 1.5; height: 4px; background: #2a2e30; border-radius: 2px; overflow: hidden; }
+        .f-track > div { height: 100%; background: #5fb878; border-radius: 2px; transition: width 0.3s ease; }
     </style>
 </head>
 <body>
@@ -45,10 +59,17 @@
         <button id="close">✕</button>
     </div>
     <div class="list" id="list"><div class="state">no downloads yet</div></div>
+    
+    <div class="footer" id="footer" style="display: none;">
+        <div class="f-text" id="f-text">Overall: 0%</div>
+        <div class="f-track"><div id="f-bar" style="width: 0%"></div></div>
+    </div>
+
     <script>
         const { ipcRenderer } = require('electron');
         const list = document.getElementById('list');
-        const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&', '<': '<', '>': '>', '"': '"' }[c]));
+        
         function render(items) {
             if (!items || !items.length) { list.innerHTML = '<div class="state">no downloads yet</div>'; return; }
             list.innerHTML = '';
@@ -56,19 +77,50 @@
                 const row = document.createElement('div');
                 row.className = 'row' + (d.state === 'completed' && d.file ? ' openable' : '');
                 const pct = Math.max(0, Math.min(100, d.percent || 0));
+                
+                const cancelBtn = d.state === 'progressing' ? `<button class="cancel-btn" data-id="${d.id}" title="Stop Download">✕</button>` : '';
+
                 row.innerHTML =
                     '<div class="name">' + esc(d.name) + '</div>' +
                     '<div class="sub"><span class="st ' + esc(d.state) + '">' + esc(d.state === 'progressing' ? pct + '%' : d.state) + '</span>' +
-                    (d.state === 'progressing' ? '<div class="track"><div style="width:' + pct + '%"></div></div>' : '') + '</div>';
+                    (d.state === 'progressing' ? '<div class="track"><div style="width:' + pct + '%"></div></div>' : '') +
+                    cancelBtn + '</div>';
+
                 if (d.state === 'completed' && d.file) {
                     row.title = 'Show in folder';
                     row.addEventListener('click', () => ipcRenderer.send('downloads:open-file', d.file));
                 }
+                
+                const btn = row.querySelector('.cancel-btn');
+                if (btn) {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        ipcRenderer.send('downloads:cancel', d.id);
+                    });
+                }
                 list.appendChild(row);
             }
         }
-        ipcRenderer.on('downloads:list', (_e, items) => render(items));
-        ipcRenderer.invoke('downloads:get').then(render).catch(() => {});
+
+        function handleList(data) {
+            const items = Array.isArray(data) ? data : (data.items || []);
+            render(items);
+            
+            const footer = document.getElementById('footer');
+            if (data.activeCount > 1) {
+                footer.style.display = 'flex';
+                let etaStr = data.eta > 0 
+                    ? (data.eta > 60 ? Math.floor(data.eta/60) + 'm ' + (data.eta%60) + 's' : data.eta + 's') 
+                    : 'calc...';
+                document.getElementById('f-text').textContent = `Overall: ${data.overallPercent}% • ETA: ${etaStr}`;
+                document.getElementById('f-bar').style.width = data.overallPercent + '%';
+            } else {
+                footer.style.display = 'none';
+            }
+        }
+
+        ipcRenderer.on('downloads:list', (_e, data) => handleList(data));
+        ipcRenderer.invoke('downloads:get').then(handleList).catch(() => {});
         document.getElementById('clear').onclick = () => ipcRenderer.send('downloads:clear');
         document.getElementById('close').onclick = () => ipcRenderer.send('downloads:close');
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ipcRenderer.send('downloads:close'); });

@@ -126,17 +126,6 @@
             color: #888 !important;
         }
 
-        /* transient download indicator, centered over the bar */
-        #dl-indicator {
-            -webkit-app-region: no-drag;
-            position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-            display: none; align-items: center; gap: 6px;
-            background: #1b1e1f; border: 1px solid #2a2e30; border-radius: 13px;
-            color: #cfcac2; font-size: 11px; padding: 4px 12px; max-width: 60%;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
-        }
-        #dl-indicator .dot { color: #1da0c3; }
-
         /* tab strip: only shown when >1 tab; shrinks the url bar via flex */
         .tabs {
             -webkit-app-region: no-drag;
@@ -193,8 +182,6 @@
 </div>
 
 <div class="spacer"></div>
-
-<div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
 
 <div class="window-controls">
     <button id="btn-downloads" title="Downloads" type="button">
@@ -333,24 +320,6 @@
         e.preventDefault();
         if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
         ipcRenderer.send('player:hotkey', cmd);
-    });
-
-    // download progress pill: shows % while downloading, then a done/failed flash
-    const dlInd = document.getElementById('dl-indicator');
-    const dlText = document.getElementById('dl-text');
-    let dlHideTimer;
-    ipcRenderer.on('download:progress', (_e, d) => {
-        clearTimeout(dlHideTimer);
-        dlInd.style.display = 'flex';
-        if (d.state === 'progressing') {
-            dlText.textContent = (d.percent >= 0 ? d.percent + '% — ' : '') + (d.name || 'downloading…');
-        } else if (d.state === 'completed') {
-            dlText.textContent = '✓ ' + (d.name || 'downloaded');
-            dlHideTimer = setTimeout(() => { dlInd.style.display = 'none'; }, 3000);
-        } else {
-            dlText.textContent = '✕ ' + (d.name || 'download failed');
-            dlHideTimer = setTimeout(() => { dlInd.style.display = 'none'; }, 3000);
-        }
     });
 </script>
 </body>

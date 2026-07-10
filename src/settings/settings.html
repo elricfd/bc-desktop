@@ -10,7 +10,7 @@
             background: #181a1b; color: #e8e6e3;
             font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Roboto, sans-serif;
             font-size: 13px;
-            /* ctrl+a used to select the whole chrome (incl. the close btn); only let inputs be selected */
+            /* ctrl+a used to select the whole chrome (incl the close btn); only let inputs be selected */
             user-select: none;
         }
         input { user-select: text; }
@@ -51,6 +51,17 @@
         .toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
         .status { font-size: 11px; margin-top: 8px; min-height: 14px; }
         .ok { color: #5fb878; } .err { color: #d66; }
+        .wb-lists { display: flex; gap: 16px; margin-top: 10px; }
+        .wb-col { flex: 1; border: 1px solid #2a2e30; border-radius: 6px; padding: 8px; background: #121415; min-height: 120px; }
+        .wb-col h3 { font-size: 11px; color: #9a968e; margin-bottom: 8px; text-transform: uppercase; text-align: center; }
+        .wb-item {
+            display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+            background: #1b1e1f; border: 1px solid #2a2e30; border-radius: 4px;
+            margin-bottom: 6px; cursor: pointer; user-select: none; color: #cfcac2;
+            transition: all 0.15s ease;
+        }
+        .wb-item:hover { border-color: #1da0c3; background: #24282a; color: #fff; }
+        .wb-item svg { width: 16px; height: 16px; fill: currentColor; }
     </style>
 </head>
 <body>
@@ -91,26 +102,24 @@
 
     <div class="section">
         <h2>General</h2>
-        <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
-        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="autoLoadCollection"> load collection in the background on startup</label>
-        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="gridHeaders"> show group headers in the collection grid view</label>
-        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="darkMode"> dark mode (uncheck for bandcamp's native theme)</label>
-        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="noDarkArtistPages"> disable dark mode on artist pages (keeps their custom themes)</label>
+            <label class="toggle"><input type="checkbox" id="closeToTray"> close to tray instead of quitting</label>
+            <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="autoLoadCollection"> load collection in the background on startup</label>
+            <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="gridHeaders"> show group headers in the collection grid view</label>
+            <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="darkMode"> dark mode (uncheck for bandcamp's native theme)</label>
+            <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="noDarkArtistPages"> disable dark mode on artist pages (keeps their custom themes)</label>
     </div>
 
     <div class="section">
         <h2>Window Bar</h2>
-        <div class="hint" style="margin-bottom:10px;">choose which controls appear in the top bar (settings & window buttons always stay).</div>
-        <label class="toggle"><input type="checkbox" id="hbHome"> bandcamp logo (home)</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbBack"> back button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbForward"> forward button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbNewtab"> new tab button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbUrlbar"> url bar</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbReload"> reload button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbDownloads"> downloads button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbGsearch"> search button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbCollection"> collection button</label>
-        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbFeed"> feed button</label>
+        <div class="hint">Click to move buttons between enabled and disabled. They will update instantly</div>
+        <div class="wb-lists">
+            <div class="wb-col" id="wb-enabled">
+                <h3>Enabled</h3>
+            </div>
+            <div class="wb-col" id="wb-disabled">
+                <h3>Disabled</h3>
+            </div>
+        </div>
     </div>
 
     <div class="section">
@@ -120,6 +129,13 @@
             <input type="text" id="downloadDir" readonly style="flex:1;" title="where purchased downloads are saved">
             <button id="btnDownloadDir" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
         </div>
+        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+        <label style="margin-top:0;">Filename Format</label>
+        <input type="text" id="fileNameFmt" placeholder="{tracknum} {artist} - {title}" autocomplete="off">
+        <label style="margin-top:10px;">Folder Format</label>
+        <input type="text" id="folderNameFmt" placeholder="{artist}/{album}" autocomplete="off">
+        <div class="hint" style="margin:6px 0 0;">Tokens available: {artist}, {album}, {title}, {tracknum}</div>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="modifyTags"> Write ID3 metadata tags (Title, Artist, Album, Cover) to stream downloads</label>
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
         <label class="toggle"><input type="checkbox" id="cacheReleases"> permanently cache release data on this computer (covers, tracklists, album info — never audio)</label>
         <label style="margin-top:10px;">Cache location</label>
@@ -162,6 +178,45 @@
         // custom titlebar close (frameless window)
         $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
 
+        const wbIcons = {
+            home: `<svg viewBox="0 0 168 100" class="polygon-logo" aria-hidden="true"><path d="M113.88 98.17H0L53.18 0h113.88z"></path></svg>`,
+            back: `<svg viewBox="0 0 16 16"><path d="M10.5 3L5.5 8l5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            forward: `<svg viewBox="0 0 16 16"><path d="M5.5 3L10.5 8l-5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            newtab: `<svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>`,
+            urlbar: `<svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 0 1-11 0 5.5 5.5 0 0 1 9.5-3.7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M10.5 2.5 12 4l-1.5 1.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            reload: `<svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 0 1-11 0 5.5 5.5 0 0 1 9.5-3.7" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M10.5 2.5 12 4l-1.5 1.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+            downloads: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 19h16" stroke-linecap="round"/></svg>`,
+            gsearch: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.2 5.2" stroke-linecap="round"/></svg>`,
+            collection: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z"/></svg>`,
+            feed: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4a16 16 0 0 1 16 16h-3A13 13 0 0 0 4 7V4zm0 6a10 10 0 0 1 10 10h-3a7 7 0 0 0-7-7v-3zm2 6.5A1.5 1.5 0 1 1 4.5 18 1.5 1.5 0 0 1 6 16.5z"/></svg>`
+        };
+
+        const wbLabels = {
+            home: 'Home', back: 'Back', forward: 'Forward', newtab: 'New Tab', urlbar: 'URL Bar', reload: 'Reload', downloads: 'Downloads', gsearch: 'Search', collection: 'Collection', feed: 'Feed'
+        };
+
+        let currentHbState = {};
+
+        function renderWbLists() {
+            const enabledList = $('wb-enabled');
+            const disabledList = $('wb-disabled');
+            enabledList.innerHTML = '<h3>Enabled</h3>';
+            disabledList.innerHTML = '<h3>Disabled</h3>';
+
+            Object.keys(wbLabels).forEach(key => {
+                const item = document.createElement('div');
+                item.className = 'wb-item';
+                item.innerHTML = `${wbIcons[key]} <span>${wbLabels[key]}</span>`;
+                item.onclick = async () => {
+                    currentHbState[key] = !currentHbState[key];
+                    renderWbLists();
+                    await persist(); // Instantly apply when interacting with visual controller
+                };
+                if (currentHbState[key]) enabledList.appendChild(item);
+                else disabledList.appendChild(item);
+            });
+        }
+
         async function refreshCacheInfo() {
             if (!ipcRenderer) return;
             try {
@@ -187,16 +242,19 @@
             $('gridHeaders').checked = s.gridHeaders === true;
             $('dlPlaylistFormat').value = s.dlPlaylistFormat || 'm3u';
             const hb = s.headerButtons || {};
-            $('hbHome').checked = hb.home === true;
-            $('hbBack').checked = hb.back !== false;
-            $('hbForward').checked = hb.forward !== false;
-            $('hbNewtab').checked = hb.newtab !== false;
-            $('hbUrlbar').checked = hb.urlbar !== false;
-            $('hbReload').checked = hb.reload !== false;
-            $('hbDownloads').checked = hb.downloads !== false;
-            $('hbGsearch').checked = hb.gsearch !== false;
-            $('hbCollection').checked = hb.collection !== false;
-            $('hbFeed').checked = hb.feed !== false;
+            currentHbState = {
+                home: hb.home === true,
+                back: hb.back !== false,
+                forward: hb.forward !== false,
+                newtab: hb.newtab !== false,
+                urlbar: hb.urlbar !== false,
+                reload: hb.reload !== false,
+                downloads: hb.downloads !== false,
+                gsearch: hb.gsearch !== false,
+                collection: hb.collection !== false,
+                feed: hb.feed !== false
+            };
+            renderWbLists();
             $('closeToTray').checked = s.closeToTray !== false;
             $('autoLoadCollection').checked = s.autoLoadCollection === true;
             $('cacheReleases').checked = s.cacheReleases === true;
@@ -207,6 +265,9 @@
             $('noDarkArtistPages').checked = s.darkArtistPages !== true;
             $('downloadDir').value = s.downloadDir || '';
             if (lfm.username) { $('lfmUser').textContent = 'connected: ' + lfm.username; $('lfmUser').className = 'status ok'; }
+            $('fileNameFmt').value = s.fileNameFmt || '{tracknum} {artist} - {title}';
+            $('folderNameFmt').value = s.folderNameFmt || '{artist}/{album}';
+            $('modifyTags').checked = s.modifyTags !== false;
         }
 
         async function persist() {
@@ -218,18 +279,10 @@
                 discordOpts: { showWhenPaused: $('dOptPaused').checked },
                 gridHeaders: $('gridHeaders').checked,
                 dlPlaylistFormat: $('dlPlaylistFormat').value,
-                headerButtons: {
-                    home: $('hbHome').checked,
-                    back: $('hbBack').checked,
-                    forward: $('hbForward').checked,
-                    newtab: $('hbNewtab').checked,
-                    urlbar: $('hbUrlbar').checked,
-                    reload: $('hbReload').checked,
-                    downloads: $('hbDownloads').checked,
-                    gsearch: $('hbGsearch').checked,
-                    collection: $('hbCollection').checked,
-                    feed: $('hbFeed').checked,
-                },
+                fileNameFmt: $('fileNameFmt').value.trim() || '{tracknum} {artist} - {title}',
+                folderNameFmt: $('folderNameFmt').value.trim() || '{artist}/{album}',
+                modifyTags: $('modifyTags').checked,
+                headerButtons: currentHbState,
                 closeToTray: $('closeToTray').checked,
                 autoLoadCollection: $('autoLoadCollection').checked,
                 cacheReleases: $('cacheReleases').checked,

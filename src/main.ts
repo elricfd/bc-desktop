@@ -355,7 +355,7 @@ function themeForUrl(url: string): 'dark' | 'light' {
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
 // which window-bar controls are visible (min/max/close/settings are not optional).
 // home defaults hidden (long-standing preference); everything else shown.
-const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: true, urlbar: true, reload: true, downloads: true, gsearch: true, collection: true, feed: true } as const;
+const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: false, urlbar: true, reload: true, downloads: true, gsearch: false, collection: true, feed: true } as const;
 function getHeaderButtons(): Record<string, boolean> {
     const saved = store.get('headerButtons', {}) as Record<string, boolean>;
     const out: Record<string, boolean> = {};
@@ -1424,33 +1424,168 @@ async function init() {
     // report progress to the header so there's a visible indicator
     // downloads registry: everything ever downloaded this session, with live
     // status, backing the header's downloads panel. Clear drops finished entries.
-    interface DlEntry { id: number; name: string; state: string; percent: number; file: string; at: number }
+    interface DlEntry { id: number; name: string; state: string; percent: number; file: string; at: number; receivedBytes: number; totalBytes: number; speed: number; lastTime: number; lastBytes: number; }
     const dlRegistry: DlEntry[] = [];
     let dlSeq = 0;
     let downloadsWin: BrowserWindow | null = null;
-    const broadcastDownloads = () => {
-        if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.webContents.send('downloads:list', dlRegistry);
+    let downloadsJustOpened = false;
+    let downloadsClosedAt = 0; // Fixes the double-toggle race condition
+
+    // Dynamically calculate the window height based on active/visible rows
+    const getDlHeight = () => {
+        const activeCount = dlRegistry.filter(d => d.state === 'progressing').length;
+        const visibleRows = Math.max(1, Math.min(3, dlRegistry.length));
+        let h = 42 + (visibleRows * 54) + 16; // 42px header + ~54px per row + padding
+        if (activeCount > 1) h += 44; // 44px footer for overall progress
+        return h;
     };
+
+    const updateDownloadsHeight = () => {
+        if (downloadsWin && !downloadsWin.isDestroyed()) {
+            const b = mainWindow.getContentBounds();
+            const h = getDlHeight();
+            downloadsWin.setBounds({ width: 360, height: h, x: Math.max(0, b.x + b.width - 372), y: b.y + 44 });
+        }
+    };
+
+    const broadcastDownloads = () => {
+        if (!downloadsWin || downloadsWin.isDestroyed()) return;
+
+        let activeCount = 0;
+        let overallPercentSum = 0;
+        let totalSpeed = 0;
+        let totalRemainingBytes = 0;
+
+        for (const d of dlRegistry) {
+            if (d.state === 'progressing') {
+                activeCount++;
+                overallPercentSum += d.percent;
+                totalSpeed += (d.speed || 0);
+                if (d.totalBytes > 0 && d.receivedBytes > 0) {
+                    totalRemainingBytes += Math.max(0, d.totalBytes - d.receivedBytes);
+                } else {
+                    // Fallback for streams where total size isn't initially known (weights it roughly as a 15MB file)
+                    const remainingPct = Math.max(0, 100 - d.percent);
+                    totalRemainingBytes += (remainingPct / 100) * 15_000_000; 
+                }
+            }
+        }
+
+        const overallPercent = activeCount > 0 ? Math.floor(overallPercentSum / activeCount) : 0;
+        let eta = -1;
+        if (activeCount > 0 && totalSpeed > 0) {
+            eta = Math.ceil(totalRemainingBytes / totalSpeed);
+        }
+
+        updateDownloadsHeight(); // Check bounds before drawing
+
+        downloadsWin.webContents.send('downloads:list', {
+            items: dlRegistry, activeCount, overallPercent, eta
+        });
+    };
+
+    const nativeDownloads = new Map<number, Electron.DownloadItem>();
+    const streamDownloads = new Map<number, { canceled: boolean }>();
+
+    const openDownloadsPanel = () => {
+        if (downloadsWin && !downloadsWin.isDestroyed()) return;
+        try {
+            downloadsJustOpened = true;
+            setTimeout(() => { downloadsJustOpened = false; }, 250);
+
+            const b = mainWindow.getContentBounds();
+            const h = getDlHeight();
+
+            downloadsWin = new BrowserWindow({
+                width: 360, height: h, frame: false, resizable: false, parent: mainWindow,
+                x: Math.max(0, b.x + b.width - 372), y: b.y + 44,
+                backgroundColor: '#181a1b',
+                webPreferences: { nodeIntegration: true, contextIsolation: false },
+            });
+
+            downloadsWin.on('blur', () => {
+                if (downloadsJustOpened) return;
+                if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.close();
+            });
+
+            downloadsWin.on('closed', () => {
+                downloadsClosedAt = Date.now(); // Arm the debounce timer
+                downloadsWin = null;
+                if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', false);
+            });
+
+            downloadsWin.loadFile(path.join(__dirname, 'downloads', 'downloads.html'));
+            downloadsWin.webContents.on('did-finish-load', () => broadcastDownloads());
+            if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', true);
+        } catch { downloadsWin = null; }
+    };
+
+    ipcMain.on('downloads:toggle', () => {
+        // Prevents the window instantly reopening if it was just closed by clicking the toggle button
+        if (Date.now() - downloadsClosedAt < 200) return;
+
+        if (downloadsWin && !downloadsWin.isDestroyed()) { 
+            if (downloadsJustOpened) return;
+            downloadsWin.close(); 
+        } else { 
+            openDownloadsPanel(); 
+        }
+    });
+
+    ipcMain.on('downloads:cancel', (_e, id: number) => {
+        const entry = dlRegistry.find(d => d.id === id);
+        if (entry && entry.state === 'progressing') {
+            entry.state = 'cancelled';
+            if (nativeDownloads.has(id)) {
+                nativeDownloads.get(id)!.cancel();
+                nativeDownloads.delete(id);
+            }
+            if (streamDownloads.has(id)) {
+                streamDownloads.get(id)!.canceled = true;
+            }
+            broadcastDownloads();
+        }
+    });
+
     session.on('will-download', (_e, item) => {
+        openDownloadsPanel();
+
         const name = item.getFilename();
         try { item.setSavePath(path.join(getDownloadDir(), name)); } catch { /* let electron pick */ }
-        const entry: DlEntry = { id: ++dlSeq, name, state: 'progressing', percent: 0, file: '', at: Date.now() };
+        const entryId = ++dlSeq;
+        const entry: DlEntry = { id: entryId, name, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
         dlRegistry.unshift(entry);
+        nativeDownloads.set(entryId, item);
+
         const send = (o: any) => {
             if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('download:progress', o);
             broadcastDownloads();
         };
         send({ name, percent: 0, state: 'progressing' });
+        
         item.on('updated', (_ev, state) => {
             if (state !== 'progressing') return;
-            const total = item.getTotalBytes();
-            const percent = total > 0 ? Math.floor((item.getReceivedBytes() / total) * 100) : -1;
-            entry.percent = Math.max(0, percent);
-            send({ name, percent, state: 'progressing' });
+            const now = Date.now();
+            const dt = (now - entry.lastTime) / 1000;
+            if (dt > 0.5) {
+                const diff = item.getReceivedBytes() - entry.lastBytes;
+                if (diff > 0) entry.speed = diff / dt;
+                entry.lastBytes = item.getReceivedBytes();
+                entry.lastTime = now;
+            }
+            
+            entry.receivedBytes = item.getReceivedBytes();
+            entry.totalBytes = item.getTotalBytes();
+            entry.percent = entry.totalBytes > 0 ? Math.floor((entry.receivedBytes / entry.totalBytes) * 100) : entry.percent;
+            
+            send({ name, percent: entry.percent, state: 'progressing' });
         });
+        
         item.on('done', (_ev, state) => {
+            nativeDownloads.delete(entryId);
             entry.state = state;
             entry.percent = 100;
+            entry.speed = 0;
             try { entry.file = item.getSavePath(); } catch { /* keep '' */ }
             send({ name, percent: 100, state });
             if (state === 'completed') pageToast('downloaded ' + name);
@@ -1458,44 +1593,26 @@ async function init() {
         });
     });
 
-    // downloads panel (small anchored window listing the registry)
-    ipcMain.on('downloads:toggle', () => {
-        if (downloadsWin && !downloadsWin.isDestroyed()) { downloadsWin.close(); return; }
-        try {
-            const b = mainWindow.getContentBounds();
-            downloadsWin = new BrowserWindow({
-                width: 360, height: 320, frame: false, resizable: false, parent: mainWindow,
-                x: Math.max(0, b.x + b.width - 372), y: b.y + 44,
-                backgroundColor: '#181a1b',
-                webPreferences: { nodeIntegration: true, contextIsolation: false },
-            });
-            downloadsWin.loadFile(path.join(__dirname, 'downloads', 'downloads.html'));
-            downloadsWin.on('closed', () => {
-                downloadsWin = null;
-                if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', false);
-            });
-            downloadsWin.webContents.on('did-finish-load', () => broadcastDownloads());
-            if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', true);
-        } catch { downloadsWin = null; }
+    ipcMain.on('downloads:close', () => { 
+        if (downloadsJustOpened) return; 
+        if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.close(); 
     });
-    ipcMain.on('downloads:close', () => { if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.close(); });
-    ipcMain.handle('downloads:get', () => dlRegistry);
+    
+    ipcMain.handle('downloads:get', () => {
+        return { items: dlRegistry, activeCount: dlRegistry.filter(d => d.state === 'progressing').length, overallPercent: 0, eta: -1 };
+    });
+    
     ipcMain.on('downloads:clear', () => {
-        // keep in-flight entries; clear finished/failed
         for (let i = dlRegistry.length - 1; i >= 0; i--) {
             if (dlRegistry[i].state !== 'progressing') dlRegistry.splice(i, 1);
         }
         broadcastDownloads();
     });
+    
     ipcMain.on('downloads:open-file', (_e, file: unknown) => {
         if (typeof file === 'string' && file && fs.existsSync(file)) shell.showItemInFolder(file);
     });
 
-    // --- stream downloads (unowned releases, bandcamp-downloader style) ------
-    // downloads a release's mp3-128 streams with ID3 tags (album/artist/album
-    // artist/title/track no/year/lyrics when published), embeds the cover, saves
-    // cover.jpg alongside, and writes a playlist file (settings: m3u/pls/wpl/zpl).
-    // progress is tracked in the downloads panel like any other download.
     const sanitizeName = (x: string) => (x || '').replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) || 'untitled';
     let streamDlActive = false;
     const startStreamDownload = async (req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }): Promise<{ ok: boolean; count?: number; error?: string }> => {
@@ -1503,49 +1620,101 @@ async function init() {
         const rel = await bandcampApi.fetchReleaseForDownload(req);
         if (!rel.ok) return { ok: false, error: rel.error };
         streamDlActive = true;
-        const entry = { id: ++dlSeq, name: `${rel.albumArtist} — ${rel.album}`, state: 'progressing', percent: 0, file: '', at: Date.now() };
+        
+        openDownloadsPanel();
+
+        const entryId = ++dlSeq;
+        const dlState = { canceled: false };
+        streamDownloads.set(entryId, dlState);
+
+        const entry: DlEntry = { id: entryId, name: `${rel.albumArtist} — ${rel.album}`, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
         dlRegistry.unshift(entry);
+        
         const prog = (state: string, percent: number, name: string) => {
             entry.state = state;
             entry.percent = Math.max(0, percent);
-            if (headerView && !headerView.webContents.isDestroyed()) {
-                headerView.webContents.send('download:progress', { state, percent, name });
-            }
             broadcastDownloads();
         };
+        
         void (async () => {
             try {
-                const dir = path.join(getDownloadDir(), sanitizeName(rel.albumArtist), sanitizeName(rel.album));
+                const fileFmt = store.get('fileNameFmt', '{tracknum} {artist} - {title}') as string;
+                const folderFmt = store.get('folderNameFmt', '{artist}/{album}') as string;
+                const modifyTags = store.get('modifyTags', true) !== false;
+
+                const formatPath = (fmt: string) => {
+                    return (fmt || '').replace(/\{artist\}/gi, sanitizeName(rel.albumArtist))
+                                      .replace(/\{album\}/gi, sanitizeName(rel.album));
+                };
+
+                const dir = path.join(getDownloadDir(), formatPath(folderFmt));
                 fs.mkdirSync(dir, { recursive: true });
                 entry.file = dir;
+                
                 let art: Buffer | null = null;
                 if (rel.artUrl) {
                     art = await bandcampApi.fetchBinary(rel.artUrl);
                     if (art && art.length) { try { fs.writeFileSync(path.join(dir, 'cover.jpg'), art); } catch { /* disk */ } }
                 }
+                
                 const files: { file: string; title: string; artist: string; duration: number }[] = [];
                 for (let i = 0; i < rel.tracks.length; i++) {
+                    if (dlState.canceled) {
+                        prog('cancelled', Math.round((i / rel.tracks.length) * 100), `${rel.album} (Cancelled)`);
+                        break;
+                    }
+
                     const t = rel.tracks[i];
                     prog('progressing', Math.round((i / rel.tracks.length) * 100), `${t.title} (${i + 1}/${rel.tracks.length})`);
+                    
+                    const t0 = Date.now();
                     const buf = await bandcampApi.fetchBinary(t.stream);
-                    if (!buf || !buf.length) continue; // stream expired/refused: skip, keep going
-                    const tag = buildId3v23({
-                        title: t.title, artist: t.artist, albumArtist: rel.albumArtist, album: rel.album,
-                        trackNum: t.trackNum, trackTotal: rel.tracks.length, year: rel.year,
-                        lyrics: t.lyrics, art: art || undefined,
-                    });
-                    const file = path.join(dir, `${String(t.trackNum).padStart(2, '0')} - ${sanitizeName(t.title)}.mp3`);
-                    fs.writeFileSync(file, Buffer.concat([tag, buf]));
+                    const dt = (Date.now() - t0) / 1000;
+                    if (buf && buf.length && dt > 0) {
+                        entry.speed = buf.length / dt;
+                        entry.receivedBytes += buf.length;
+                    }
+                    
+                    if (!buf || !buf.length) continue; 
+                    
+                    const formatFileName = (fmt: string, trackTitle: string, trackArtist: string, trackNum: string) => {
+                        let name = (fmt || '{tracknum} {artist} - {title}').replace(/\{artist\}/gi, sanitizeName(trackArtist))
+                            .replace(/\{album\}/gi, sanitizeName(rel.album))
+                            .replace(/\{title\}/gi, sanitizeName(trackTitle))
+                            .replace(/\{tracknum\}/gi, trackNum.padStart(2, '0'));
+                        if (!name.toLowerCase().endsWith('.mp3')) name += '.mp3';
+                        return name;
+                    };
+
+                    const fileName = formatFileName(fileFmt, t.title, t.artist, String(t.trackNum));
+                    const file = path.join(dir, fileName);
+
+                    if (modifyTags) {
+                        const tag = buildId3v23({
+                            title: t.title, artist: t.artist, albumArtist: rel.albumArtist, album: rel.album,
+                            trackNum: t.trackNum, trackTotal: rel.tracks.length, year: rel.year,
+                            lyrics: t.lyrics, art: art || undefined,
+                        });
+                        fs.writeFileSync(file, Buffer.concat([tag, buf]));
+                    } else {
+                        fs.writeFileSync(file, buf);
+                    }
+
                     files.push({ file, title: t.title, artist: t.artist, duration: t.duration });
                     await new Promise((res) => setTimeout(res, 250)); // gentle on the cdn
                 }
-                writePlaylistFile(dir, rel.album, files);
-                prog(files.length ? 'completed' : 'interrupted', 100, `${rel.album} (${files.length}/${rel.tracks.length} tracks)`);
+
+                if (!dlState.canceled) {
+                    writePlaylistFile(dir, rel.album, files);
+                    prog(files.length ? 'completed' : 'interrupted', 100, `${rel.album} (${files.length}/${rel.tracks.length} tracks)`);
+                }
             } catch (err: any) {
                 if (devMode) console.log('[bcrpc] stream download FAILED ' + (err && (err.message || err)));
                 prog('interrupted', 0, rel.album);
             } finally {
+                streamDownloads.delete(entryId);
                 streamDlActive = false;
+                entry.speed = 0;
             }
         })();
         return { ok: true, count: rel.tracks.length };
@@ -1681,6 +1850,9 @@ async function init() {
             closeToTray: store.get('closeToTray', true),
             autoLoadCollection: store.get('autoLoadCollection', false) === true,
             cacheReleases: cacheReleasesOn(),
+            fileNameFmt: store.get('fileNameFmt', '{tracknum} {artist} - {title}'),
+            folderNameFmt: store.get('folderNameFmt', '{artist}/{album}'),
+            modifyTags: store.get('modifyTags', true) !== false,
             gridHeaders: store.get('gridHeaders', false) === true,
             headerButtons: getHeaderButtons(),
             dlPlaylistFormat: String(store.get('dlPlaylistFormat', 'm3u')),
@@ -1695,6 +1867,9 @@ async function init() {
         try {
             const existing = (store.get('lastfm') as any) || {};
             store.set('lastfm', { ...existing, ...(data.lastfm || {}) });
+            if (typeof data.fileNameFmt === 'string') store.set('fileNameFmt', data.fileNameFmt);
+            if (typeof data.folderNameFmt === 'string') store.set('folderNameFmt', data.folderNameFmt);
+            if (typeof data.modifyTags === 'boolean') store.set('modifyTags', data.modifyTags);
             if (typeof data.discordEnabled === 'boolean') store.set('discordEnabled', data.discordEnabled);
             if (typeof data.closeToTray === 'boolean') store.set('closeToTray', data.closeToTray);
             if (typeof data.discordClientId === 'string') {
@@ -1844,9 +2019,33 @@ async function init() {
         });
 
         // keep url bar + tab title in sync
+        // keep url bar + tab title in sync
         const onNav = () => {
             const tab = tabs.find((t) => t.view === view);
-            if (tab) { const ti = wc.getTitle(); if (ti) tab.title = ti; }
+            if (tab) {
+                let ti = wc.getTitle() || '';
+                
+                // Strip the trailing " | Bandcamp"
+                if (ti.endsWith(' | Bandcamp')) {
+                    ti = ti.replace(' | Bandcamp', '');
+                }
+                
+                // Use the URL path (like /discover/) if title is just "Bandcamp" or empty
+                if (ti === 'Bandcamp' || ti.trim() === '') {
+                    try {
+                        const u = new URL(wc.getURL());
+                        if (u.pathname && u.pathname !== '/') {
+                            ti = u.pathname;
+                        } else {
+                            ti = 'Bandcamp';
+                        }
+                    } catch {
+                        ti = 'Bandcamp';
+                    }
+                }
+                
+                tab.title = ti;
+            }
             if (isActive()) pushUrl();
             sendTabsState();
         };
