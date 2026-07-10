@@ -107,6 +107,7 @@
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbNewtab"> new tab button</label>
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbUrlbar"> url bar</label>
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbReload"> reload button</label>
+        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbDownloads"> downloads button</label>
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbGsearch"> search button</label>
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbCollection"> collection button</label>
         <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="hbFeed"> feed button</label>
@@ -127,6 +128,16 @@
             <button id="btnCacheDir" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
         </div>
         <div class="hint" id="cacheSize" style="margin:6px 0 0;"></div>
+        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+        <label style="margin-top:0;">Playlist file for stream downloads</label>
+        <select id="dlPlaylistFormat" style="width:100%;background:#121415;border:1px solid #2a2e30;border-radius:5px;color:#e8e6e3;padding:8px 10px;font-size:12px;">
+            <option value="m3u">m3u</option>
+            <option value="pls">pls</option>
+            <option value="wpl">wpl</option>
+            <option value="zpl">zpl</option>
+            <option value="none">none</option>
+        </select>
+        <div class="hint" style="margin:6px 0 0;">written next to the tracks when downloading a release's mp3-128 streams (release-page button, right-click menu, or the ⤓ on wishlist items).</div>
     </div>
 
     <button id="btnSave">Save</button>
@@ -174,6 +185,7 @@
             const dOpts = s.discordOpts || {};
             $('dOptPaused').checked = dOpts.showWhenPaused === true;
             $('gridHeaders').checked = s.gridHeaders === true;
+            $('dlPlaylistFormat').value = s.dlPlaylistFormat || 'm3u';
             const hb = s.headerButtons || {};
             $('hbHome').checked = hb.home === true;
             $('hbBack').checked = hb.back !== false;
@@ -181,6 +193,7 @@
             $('hbNewtab').checked = hb.newtab !== false;
             $('hbUrlbar').checked = hb.urlbar !== false;
             $('hbReload').checked = hb.reload !== false;
+            $('hbDownloads').checked = hb.downloads !== false;
             $('hbGsearch').checked = hb.gsearch !== false;
             $('hbCollection').checked = hb.collection !== false;
             $('hbFeed').checked = hb.feed !== false;
@@ -204,6 +217,7 @@
                 discordClientId: $('discordClientId').value.trim(),
                 discordOpts: { showWhenPaused: $('dOptPaused').checked },
                 gridHeaders: $('gridHeaders').checked,
+                dlPlaylistFormat: $('dlPlaylistFormat').value,
                 headerButtons: {
                     home: $('hbHome').checked,
                     back: $('hbBack').checked,
@@ -211,6 +225,7 @@
                     newtab: $('hbNewtab').checked,
                     urlbar: $('hbUrlbar').checked,
                     reload: $('hbReload').checked,
+                    downloads: $('hbDownloads').checked,
                     gsearch: $('hbGsearch').checked,
                     collection: $('hbCollection').checked,
                     feed: $('hbFeed').checked,

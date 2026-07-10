@@ -12,9 +12,8 @@ antiFlashStyle.textContent = (bcTheme === 'light'
     ? ''
     : `html { background-color: #181a1b !important; }
        html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }`)
-    // keep the release-page .inline_player visible: on single-track pages it's the
-    // ONLY play control (albums have their tracklist rows), so hiding it left singles
-    // with no way to start playback. hide only the persistent floating/collection bars.
+    // keep the release-page .inline_player fully visible (people like it): it is
+    // kept alive by mirroring OUR player's state into it (see page:now-playing).
     + `\n#collection-player, .floating-player { display: none !important; }`;
 const antiFlashRoot = document.head || document.documentElement;
 if (antiFlashRoot) antiFlashRoot.appendChild(antiFlashStyle);
@@ -180,6 +179,91 @@ document.addEventListener('click', (e) => {
     if (!btn || !document.getElementById('PlaylistPage')) return;
     ipcRenderer.send('app:playlist-play');
 }, true);
+
+// mirror OUR playback onto the release page's inline player (play state,
+// progress bar, elapsed/total time) so it works like the native one. only when
+// the playing track belongs to THIS page (url match) — other releases' players
+// are left alone. clicking its progress bar seeks our player.
+const fmtClock = (x: number): string => Math.floor(x / 60) + ':' + String(Math.floor(x % 60)).padStart(2, '0');
+ipcRenderer.on('page:now-playing', (_e, np: any) => {
+    try {
+        if (!np) return;
+        const ip = document.querySelector('.inline_player') as HTMLElement | null;
+        if (!ip) return;
+        const norm = (u: string) => String(u || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase();
+        const page = norm(location.href);
+        const track = norm(np.url);
+        // album page match: the playing track's url is the release page url; track
+        // pages of the same release also count (shared /album/ or /track/ root)
+        const match = track && (track === page || track.startsWith(page + '/') || page.startsWith(track));
+        if (!match) return;
+        const btn = ip.querySelector('.playbutton');
+        if (btn) btn.classList.toggle('playing', np.isPlaying === true);
+        const dur = Number(np.duration) || 0;
+        const frac = dur > 0 ? Math.min(1, Math.max(0, Number(np.position || 0) / dur)) : 0;
+        const fill = ip.querySelector('.progbar_fill') as HTMLElement | null;
+        if (fill) fill.style.width = (frac * 100).toFixed(2) + '%';
+        const thumb = ip.querySelector('.thumb') as HTMLElement | null;
+        const bar = ip.querySelector('.progbar_empty, .progbar') as HTMLElement | null;
+        if (thumb && bar && bar.clientWidth > 0) {
+            thumb.style.left = Math.max(0, Math.round(frac * (bar.clientWidth - thumb.clientWidth))) + 'px';
+        }
+        const el = ip.querySelector('.time_elapsed');
+        if (el) el.textContent = fmtClock(Number(np.position) || 0);
+        const tot = ip.querySelector('.time_total');
+        if (tot && dur) tot.textContent = fmtClock(dur);
+    } catch (e) { /* page layout changed; mirroring is best-effort */ }
+});
+// clicking the inline player's progress bar seeks OUR player to that fraction
+document.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    const bar = t && t.closest ? (t.closest('.inline_player .progbar') as HTMLElement | null) : null;
+    if (!bar) return;
+    const r = bar.getBoundingClientRect();
+    if (r.width <= 0) return;
+    const frac = Math.min(1, Math.max(0, ((e as MouseEvent).clientX - r.left) / r.width));
+    ipcRenderer.send('player:seek-frac', frac);
+}, true);
+
+// download button on release pages: owned releases jump to their bandcamp
+// download page (all your formats, tracked in the downloads panel); unowned
+// ones download the mp3-128 streams (tagged, with cover) via the app.
+function injectReleaseDownload(): void {
+    try {
+        if (!/\/(album|track)\//.test(location.pathname)) return;
+        if (document.getElementById('bcrpc-dlbtn')) return;
+        const blobEl = document.querySelector('[data-tralbum]');
+        if (!blobEl) return;
+        let info: any = null;
+        try { info = JSON.parse(blobEl.getAttribute('data-tralbum') || ''); } catch { return; }
+        const tralbumId = String(info?.id || '');
+        const type = (info?.item_type === 'track' || info?.item_type === 't') ? 't' : 'a';
+        if (!tralbumId) return;
+        const anchor = (document.querySelector('.inline_player') || document.querySelector('#name-section') || document.querySelector('h2.trackTitle')) as HTMLElement | null;
+        if (!anchor || !anchor.parentElement) return;
+        ipcRenderer.invoke('release:download-info', { tralbumId, tralbumType: type }).then((res: any) => {
+            if (document.getElementById('bcrpc-dlbtn')) return;
+            const owned = !!(res && res.owned && res.downloadUrl);
+            const btn = document.createElement('button');
+            btn.id = 'bcrpc-dlbtn';
+            btn.type = 'button';
+            btn.textContent = owned ? '⤓ Download (you own this)' : '⤓ Download mp3-128';
+            btn.title = owned ? 'Open your download page (all formats)' : "Download this release's streams with tags & cover art";
+            btn.style.cssText = 'display:inline-block;margin:10px 0;padding:7px 14px;font-size:13px;cursor:pointer;border:1px solid #1da0c3;border-radius:6px;background:rgba(29,160,195,.12);color:#1da0c3;font-family:inherit;';
+            btn.addEventListener('click', async () => {
+                if (owned) { location.href = res.downloadUrl; return; }
+                btn.textContent = '⤓ starting…';
+                try {
+                    const r = await ipcRenderer.invoke('download:release', { url: location.href.split(/[?#]/)[0] });
+                    btn.textContent = r && r.ok ? '⤓ downloading — see the downloads panel' : '⤓ ' + ((r && r.error) || 'failed');
+                } catch { btn.textContent = '⤓ failed'; }
+            });
+            anchor.parentElement!.insertBefore(btn, anchor.nextSibling);
+        }).catch(() => { /* no button */ });
+    } catch (e) { /* page shape changed; button is best-effort */ }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectReleaseDownload);
+else injectReleaseDownload();
 
 // mouse back/forward -> main (debounced) so don't double w/ os app command
 window.addEventListener('mouseup', (e) => {

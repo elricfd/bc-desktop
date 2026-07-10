@@ -193,8 +193,9 @@ let loadedSigAt = 0;
 ipcRenderer.on('player:stream-incoming', (_e, data: StreamPayload) => {
     if (!data?.queue?.length) return;
     const target = data.queue[data.activeIndex] || data.queue[0];
-    // ignore retrap of track already playing (multi chunk reqs)
-    if (queue.current()?.id === target?.id && queue.current()?.id) return;
+    // retrap of the track already loaded: that's the user clicking the page's
+    // play button again — toggle play/pause (burst dedup happens main-side)
+    if (queue.current()?.id === target?.id && queue.current()?.id) { doToggle(); return; }
 
     // once loaded release muted page player keeps advancing thru it (each cancelled stream makes it skip to next track) firing burst of identical queue events. acting on them makes player race to last track & floods bandcamp w/ stream reqs (http 429). ignore same queue events for short window; diff release (or deliberate replay after burst) still loads.
     const sig = data.queue.length + ':' + (data.queue[0]?.id || '') + ':' + (data.queue[data.queue.length - 1]?.id || '');
@@ -306,6 +307,14 @@ function runHotkey(cmd: string): void {
     }
 }
 ipcRenderer.on('player:hotkey', (_e, cmd: unknown) => runHotkey(String(cmd || '')));
+
+// the release page's inline progress bar seeks by fraction
+ipcRenderer.on('player:seek-frac', (_e, frac: unknown) => {
+    const f = Math.min(1, Math.max(0, Number(frac) || 0));
+    if (!queue.current() || !audio.duration) return;
+    audio.currentTime = audio.duration * f;
+    emitNowPlaying(true);
+});
 
 // same mapping for keys pressed while the player view itself is focused.
 // NOTE: keep in sync with the copies in preload.ts / collection.ts / header.html

@@ -358,7 +358,14 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             }
             if (!queue.length) return null;
             var active = 0;
-            if (tid) { var idx = queue.findIndex(function (t) { return t.id === tid; }); if (idx !== -1) active = idx; }
+            if (tid) {
+                var idx = queue.findIndex(function (t) { return t.id === tid; });
+                // the blob only embeds the FIRST ~30 tracks of a long playlist; a
+                // clicked track beyond that isn't in it. bailing to the api resolvers
+                // plays the RIGHT track instead of silently starting from track 1.
+                if (idx === -1) return null;
+                active = idx;
+            }
             if (queue[active] && !queue[active].src) queue[active].src = targetUrl;
             return { queue: queue, activeIndex: active, context: 'playlist', format: format };
         }

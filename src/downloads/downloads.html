@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Bandcamp</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; scrollbar-width: none; }
+        ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+        body {
+            background: #181a1b; color: #e8e6e3; height: 100vh; overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Roboto, sans-serif;
+            font-size: 12px; user-select: none; display: flex; flex-direction: column;
+            border: 1px solid #2a2e30; border-radius: 8px;
+        }
+        .bar {
+            -webkit-app-region: drag; display: flex; align-items: center; gap: 8px;
+            padding: 10px 12px; border-bottom: 1px solid #2a2e30; flex-shrink: 0;
+        }
+        .bar h1 { font-size: 13px; font-weight: 600; flex: 1; }
+        .bar button {
+            -webkit-app-region: no-drag;
+            background: #24282a; border: 1px solid #2a2e30; color: #e8e6e3;
+            border-radius: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer; font-family: inherit;
+        }
+        .bar button:hover { border-color: #1da0c3; }
+        .list { flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: thin; scrollbar-color: #3a3f42 transparent; }
+        .row { padding: 8px 10px; border-radius: 6px; cursor: default; }
+        .row.openable { cursor: pointer; }
+        .row:hover { background: rgba(255,255,255,.05); }
+        .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sub { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+        .st { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #848079; flex-shrink: 0; }
+        .st.completed { color: #5fb878; }
+        .st.progressing { color: #1da0c3; }
+        .st.interrupted, .st.cancelled { color: #d66; }
+        .track { flex: 1; height: 4px; background: #2a2e30; border-radius: 2px; overflow: hidden; }
+        .track > div { height: 100%; background: #1da0c3; border-radius: 2px; }
+        .state { padding: 30px 12px; color: #848079; font-size: 12px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="bar">
+        <h1>Downloads</h1>
+        <button id="clear" title="Remove finished downloads from the list">Clear</button>
+        <button id="close">✕</button>
+    </div>
+    <div class="list" id="list"><div class="state">no downloads yet</div></div>
+    <script>
+        const { ipcRenderer } = require('electron');
+        const list = document.getElementById('list');
+        const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+        function render(items) {
+            if (!items || !items.length) { list.innerHTML = '<div class="state">no downloads yet</div>'; return; }
+            list.innerHTML = '';
+            for (const d of items) {
+                const row = document.createElement('div');
+                row.className = 'row' + (d.state === 'completed' && d.file ? ' openable' : '');
+                const pct = Math.max(0, Math.min(100, d.percent || 0));
+                row.innerHTML =
+                    '<div class="name">' + esc(d.name) + '</div>' +
+                    '<div class="sub"><span class="st ' + esc(d.state) + '">' + esc(d.state === 'progressing' ? pct + '%' : d.state) + '</span>' +
+                    (d.state === 'progressing' ? '<div class="track"><div style="width:' + pct + '%"></div></div>' : '') + '</div>';
+                if (d.state === 'completed' && d.file) {
+                    row.title = 'Show in folder';
+                    row.addEventListener('click', () => ipcRenderer.send('downloads:open-file', d.file));
+                }
+                list.appendChild(row);
+            }
+        }
+        ipcRenderer.on('downloads:list', (_e, items) => render(items));
+        ipcRenderer.invoke('downloads:get').then(render).catch(() => {});
+        document.getElementById('clear').onclick = () => ipcRenderer.send('downloads:clear');
+        document.getElementById('close').onclick = () => ipcRenderer.send('downloads:close');
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') ipcRenderer.send('downloads:close'); });
+    </script>
+</body>
+</html>

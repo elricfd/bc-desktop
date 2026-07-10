@@ -71,6 +71,12 @@
             font-size: 18px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s ease;
         }
         .card:hover .enq { opacity: 1; }
+        /* wishlist marker (top-left of the cover) */
+        .wishb {
+            position: absolute; left: 6px; top: 6px; font-size: 12px; line-height: 1;
+            background: rgba(24,26,27,.85); color: #e46; border-radius: 4px; padding: 4px 6px;
+            pointer-events: none;
+        }
         .enq:hover { background: var(--accent); }
         .dlmenu {
             position: fixed; z-index: 50; width: 190px; background: #202325;
@@ -207,6 +213,11 @@
         <span class="count" id="count"></span>
         <div class="spacer"></div>
         <input type="text" id="search" placeholder="Search artist, title, track or tag" spellcheck="false" autocomplete="off">
+        <select id="scope" title="Show">
+            <option value="all">Everything</option>
+            <option value="own">Owned</option>
+            <option value="wish">Wishlist</option>
+        </select>
         <select id="sort" title="Sort by">
             <option value="added">Date added</option>
             <option value="artist">Artist</option>

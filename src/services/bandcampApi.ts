@@ -452,7 +452,8 @@ export class BandcampApi {
     async fetchCollection(
         maxItems = 20000,
         onProgress?: (added: CollectionItem[], soFar: number, total: number) => void,
-        stopAtKeys?: Set<string>
+        stopAtKeys?: Set<string>,
+        kind: 'collection' | 'wishlist' = 'collection'
     ): Promise<CollectionItem[]> {
         const session = this.getSession();
         if (!session) return [];
@@ -468,7 +469,7 @@ export class BandcampApi {
                 fanId = toId(d?.fan_id ?? d?.collection_summary?.fan_id);
                 // summary lists every owned tralbum keyed by <type><id>; its size is the real count to page toward
                 const lookup = d?.collection_summary?.tralbum_lookup;
-                if (lookup && typeof lookup === 'object') total = Object.keys(lookup).length;
+                if (kind === 'collection' && lookup && typeof lookup === 'object') total = Object.keys(lookup).length;
             }
         } catch {
             // fall thru
@@ -480,7 +481,7 @@ export class BandcampApi {
         const fetchPage = async (token: string): Promise<any | null> => {
             for (let attempt = 0; attempt < 6; attempt++) {
                 try {
-                    const r = await session.fetch('https://bandcamp.com/api/fancollection/1/collection_items', {
+                    const r = await session.fetch(`https://bandcamp.com/api/fancollection/1/${kind}_items`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ fan_id: Number(fanId), older_than_token: token, count: COUNT }),
@@ -513,6 +514,7 @@ export class BandcampApi {
             let hitKnown = false;
             for (const it of items) {
                 const c = this.normalizeCollectionItem(it, redl);
+                if (kind === 'wishlist') c.wish = true;
                 const key = c.tralbumType + c.tralbumId;
                 if (!c.tralbumId || seen.has(key)) continue;
                 if (stopAtKeys && stopAtKeys.has(key)) { hitKnown = true; break; }
@@ -611,6 +613,19 @@ export class BandcampApi {
             const r = await session.fetch(url, { credentials: 'include' } as any);
             await r.text(); // consume — the page visit itself triggers regeneration
         } catch { /* snapshot stays stale; updates endpoint still works */ }
+    }
+
+    /** bandcamp's authoritative owned-item count (collection_summary lookup size). 0 if unknown. */
+    async fetchOwnedTotal(): Promise<number> {
+        const session = this.getSession();
+        if (!session) return 0;
+        try {
+            const r = await session.fetch('https://bandcamp.com/api/fan/2/collection_summary', { credentials: 'include' } as any);
+            if (!r.ok) return 0;
+            const d: any = await r.json();
+            const lookup = d?.collection_summary?.tralbum_lookup;
+            return lookup && typeof lookup === 'object' ? Object.keys(lookup).length : 0;
+        } catch { return 0; }
     }
 
     /** normalize one feed story entry (fields vary between story types & api versions). */
@@ -742,6 +757,77 @@ export class BandcampApi {
         } catch (e: any) {
             return { ok: false, results: [], error: e?.message || 'search failed' };
         }
+    }
+
+    // --- stream downloads (unowned releases) ---------------------------------
+
+    /**
+     * everything needed to download a release's streams with proper tags: album,
+     * album artist, year, cover url, and per-track title/artist/number/lyrics/
+     * stream url. accepts a page url (richest payload — the page blob can carry
+     * lyrics) or tralbum ids.
+     */
+    async fetchReleaseForDownload(q: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }): Promise<{
+        ok: boolean; error?: string;
+        album: string; albumArtist: string; year: number; artUrl: string;
+        tracks: { title: string; artist: string; trackNum: number; lyrics: string; stream: string; duration: number }[];
+    }> {
+        this.noteInteractive();
+        const empty = (error: string) => ({ ok: false, error, album: '', albumArtist: '', year: 0, artUrl: '', tracks: [] });
+        let data: any = null;
+        // page blob first (has lyrics when the artist published them)
+        if (q.url && /^https:\/\//.test(q.url)) {
+            const session = this.getSession();
+            if (session) {
+                try {
+                    const r = await session.fetch(q.url, { credentials: 'include' } as any);
+                    if (r.ok) {
+                        const html = await r.text();
+                        const m = html.match(/data-tralbum="([^"]+)"/);
+                        if (m) {
+                            try { data = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')); } catch { /* fall through */ }
+                        }
+                        // lyrics usually are NOT in the blob — the page renders them
+                        // as <tr id="lyrics_row_<trackNum>"> rows (BandcampDownloader
+                        // does the same scrape)
+                        if (data && Array.isArray(data.trackinfo)) {
+                            for (const t of data.trackinfo) {
+                                if (t && !t.lyrics && t.track_num) {
+                                    const lm = html.match(new RegExp('id="lyrics_row_' + t.track_num + '"[^>]*>([\\s\\S]*?)</tr>', 'i'));
+                                    if (lm) {
+                                        const text = lm[1].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+                                        if (text) t.lyrics = text;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch { /* fall through to api */ }
+            }
+        }
+        if (!data && q.tralbumId) {
+            const type: TralbumType = q.tralbumType === 't' ? 't' : 'a';
+            data = await this.fetchRaw(type, toId(q.tralbumId), q.bandId);
+        }
+        if (!data || typeof data !== 'object') return empty('could not load the release');
+
+        const cur = data.current || {};
+        const albumArtist = String(cur.artist || data.artist || data.tralbum_artist || (data.band && data.band.name) || '').trim() || 'Unknown Artist';
+        const album = String(data.album_title || cur.title || data.title || '').trim() || 'Unknown Release';
+        const year = this.extractYear(data);
+        const artId = toId(data.art_id ?? cur.art_id);
+        const artUrl = artId ? `https://f4.bcbits.com/img/a${artId}_10.jpg` : '';
+        const rows: any[] = Array.isArray(data.trackinfo) ? data.trackinfo : Array.isArray(data.tracks) ? data.tracks : [];
+        const tracks = rows.map((t: any, i: number) => ({
+            title: String((t && t.title) || '').trim() || `Track ${i + 1}`,
+            artist: String((t && (t.artist || t.band_name)) || '').trim() || albumArtist,
+            trackNum: Number(t && t.track_num) || i + 1,
+            lyrics: typeof t?.lyrics === 'string' ? t.lyrics : '',
+            stream: pickStream(t && (t.file || t.streaming_url || t.mp3_url)),
+            duration: Math.max(0, Math.floor(Number(t && t.duration) || 0)),
+        })).filter((t) => t.stream);
+        if (!tracks.length) return empty('no streamable tracks (private or preorder?)');
+        return { ok: true, album, albumArtist, year, artUrl, tracks };
     }
 
     // --- downloads (purchased items) ----------------------------------------

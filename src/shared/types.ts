@@ -90,6 +90,8 @@ export interface CollectionItem {
     year: number;
     /** bandcamp download page url for owned items; '' when not downloadable. */
     downloadUrl: string;
+    /** true for wishlist items (not owned; shown alongside the collection). */
+    wish?: boolean;
 }
 
 /** one format offered on a download page. */

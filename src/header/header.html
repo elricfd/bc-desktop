@@ -197,6 +197,9 @@
 <div id="dl-indicator"><span class="dot">⤓</span><span id="dl-text"></span></div>
 
 <div class="window-controls">
+    <button id="btn-downloads" title="Downloads" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 19h16" stroke-linecap="round"/></svg>
+    </button>
     <button id="btn-gsearch" title="Search all of Bandcamp" type="button">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.2 5.2" stroke-linecap="round"/></svg>
     </button>
@@ -237,6 +240,10 @@
     btnFeed.onclick = () => ipcRenderer.send('feed:toggle');
     ipcRenderer.on('feed:state', (_e, open) => { btnFeed.style.color = open ? '#1da0c3' : ''; });
 
+    const btnDownloads = document.getElementById('btn-downloads');
+    btnDownloads.onclick = () => ipcRenderer.send('downloads:toggle');
+    ipcRenderer.on('downloads:state', (_e, open) => { btnDownloads.style.color = open ? '#1da0c3' : ''; });
+
     const btnGsearch = document.getElementById('btn-gsearch');
     btnGsearch.onclick = () => ipcRenderer.send('gsearch:toggle');
     ipcRenderer.on('gsearch:state', (_e, open) => { btnGsearch.style.color = open ? '#1da0c3' : ''; });
@@ -252,6 +259,7 @@
         show(document.getElementById('btn-newtab'), cfg.newtab !== false);
         show(document.querySelector('.urlwrap'), cfg.urlbar !== false);
         show(document.getElementById('btn-reload'), cfg.reload !== false);
+        show(btnDownloads, cfg.downloads !== false);
         show(btnGsearch, cfg.gsearch !== false);
         show(btnCollection, cfg.collection !== false);
         show(btnFeed, cfg.feed !== false);

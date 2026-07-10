@@ -10,6 +10,7 @@ import { PresenceService } from './services/presenceService';
 import { LastfmService } from './services/lastfmService';
 import { BandcampApi } from './services/bandcampApi';
 import { buildExtractorScript } from './services/queueExtractor';
+import { buildId3v23 } from './services/id3';
 import type { NowPlaying, ResolveStreamRequest, ResolveStreamResponse, TralbumType, PlayerTrack } from './shared/types';
 
 const darkReaderPath = require.resolve('darkreader/darkreader.js');
@@ -354,7 +355,7 @@ function themeForUrl(url: string): 'dark' | 'light' {
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
 // which window-bar controls are visible (min/max/close/settings are not optional).
 // home defaults hidden (long-standing preference); everything else shown.
-const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: true, urlbar: true, reload: true, gsearch: true, collection: true, feed: true } as const;
+const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: true, urlbar: true, reload: true, downloads: true, gsearch: true, collection: true, feed: true } as const;
 function getHeaderButtons(): Record<string, boolean> {
     const saved = store.get('headerButtons', {}) as Record<string, boolean>;
     const out: Record<string, boolean> = {};
@@ -594,6 +595,9 @@ async function init() {
     let gestureSeen = false;
     let fallbackCooldownUntil = 0;
     let trapSeq = 0;
+    // assigned once the collection fetcher exists; fired (debounced) whenever the
+    // fan collects/uncollects something on a bandcamp page
+    let onCollectAction: ((removal: boolean) => void) | null = null;
     ipcMain.on('player:user-gesture', () => { gestureSeen = true; userGestureAt = Date.now(); });
 
     // net trap & tracklist extractor
@@ -671,6 +675,15 @@ async function init() {
 
         // (playlist header play button never streams, so it can't be trapped;
         // the preload click hook below drives the extractor directly instead)
+
+        // wishlist hearts / collection changes post to *collect_item_cb — refresh
+        // the custom collection so the change shows up right away. removals
+        // (uncollect / hide) force a full silent re-scan, since only a re-scan
+        // can discover which item disappeared.
+        if (/\/(?:un)?collect_item_cb|\/wishlist_cb|hide_unhide_item/.test(reqUrl)) {
+            const removal = /uncollect_item_cb|hide_unhide_item/.test(reqUrl);
+            try { onCollectAction && onCollectAction(removal); } catch { /* not ready yet */ }
+        }
 
         callback({ cancel: false });
     });
@@ -893,45 +906,93 @@ async function init() {
             return local ? { ...i, art: local } : i;
         });
     };
-    ipcMain.handle('collection:fetch', async () => {
-        const sendItems = (added: any[], soFar: number, total: number) => {
-            if (collectionView && !collectionView.webContents.isDestroyed()) {
-                collectionView.webContents.send('collection:items', { items: mapCachedArt(added), soFar, total });
-            }
-        };
-        // cache-first: with the release cache on, the saved listing loads instantly
-        // and the network is only asked for purchases NEWER than the cache (the
-        // fancollection api pages newest-first, so we stop at the first known item).
-        // Reload therefore "checks for new ones" instead of re-scanning everything.
-        const cached = cacheReleasesOn() ? collectionItemsDisk.get() : [];
-        if (Array.isArray(cached) && cached.length) {
-            sendItems(cached, cached.length, cached.length);
-            try {
-                const known = new Set<string>(cached.map((c: any) => c.tralbumType + c.tralbumId));
-                const fresh = await bandcampApi.fetchCollection(20000, undefined, known);
-                if (devMode) console.log('[bcrpc] collection:fetch cache=' + cached.length + ' new=' + fresh.length);
-                if (fresh.length) {
-                    const total = cached.length + fresh.length;
-                    sendItems(fresh, total, total);
-                    collectionItemsDisk.replace([...fresh, ...cached]);
-                    return { ok: true, count: total };
-                }
-            } catch { /* cache alone is fine */ }
-            return { ok: true, count: cached.length, cached: true };
+    const sendCollItems = (added: any[], soFar: number, total: number) => {
+        if (collectionView && !collectionView.webContents.isDestroyed()) {
+            collectionView.webContents.send('collection:items', { items: mapCachedArt(added), soFar, total });
         }
-        // no cache: full paginated fetch (and seed the cache if the setting is on)
+    };
+    // cache-first: with the release cache on, the saved listing loads instantly
+    // and the network is only asked for items NEWER than the cache (the
+    // fancollection api pages newest-first, so we stop at the first known item).
+    // Reload therefore "checks for new ones" instead of re-scanning everything.
+    // the wishlist rides along: same api family, items tagged wish:true.
+    let collFetchActive = false;
+    const fetchCollectionAndWishlist = async (fullRescan = false): Promise<{ ok: boolean; count: number; cached?: boolean; error?: string }> => {
+        if (collFetchActive) return { ok: true, count: 0 };
+        collFetchActive = true;
         try {
-            const items = await bandcampApi.fetchCollection(20000, sendItems);
-            if (devMode) console.log('[bcrpc] collection:fetch ' + items.length + ' items');
-            if (items.length) {
-                if (cacheReleasesOn()) collectionItemsDisk.replace(items);
-                return { ok: true, count: items.length };
+            const cached = (!fullRescan && cacheReleasesOn()) ? collectionItemsDisk.get() : [];
+            if (Array.isArray(cached) && cached.length) {
+                sendCollItems(cached, cached.length, cached.length);
+                try {
+                    const knownOwned = new Set<string>(cached.filter((c: any) => !c.wish).map((c: any) => c.tralbumType + c.tralbumId));
+                    const knownWish = new Set<string>(cached.filter((c: any) => c.wish).map((c: any) => c.tralbumType + c.tralbumId));
+                    const freshOwned = await bandcampApi.fetchCollection(20000, undefined, knownOwned, 'collection');
+                    const freshWish = await bandcampApi.fetchCollection(20000, undefined, knownWish, 'wishlist');
+                    // an item that got purchased graduates from wishlist to owned
+                    const ownedKeys = new Set<string>(freshOwned.map((c) => c.tralbumType + c.tralbumId));
+                    const fresh = [...freshOwned, ...freshWish.filter((c) => !ownedKeys.has(c.tralbumType + c.tralbumId))];
+                    if (devMode) console.log('[bcrpc] collection:fetch cache=' + cached.length + ' new=' + fresh.length);
+                    // owned count DROPPED on bandcamp's side (something was hidden):
+                    // schedule a silent full re-scan so the vanished item disappears
+                    // here too (runs after this refresh finishes)
+                    const ownedTotal = await bandcampApi.fetchOwnedTotal();
+                    const ownedHave = [...fresh, ...cached.filter((c: any) => !fresh.some((f) => f.tralbumType + f.tralbumId === c.tralbumType + c.tralbumId))]
+                        .filter((c: any) => !c.wish).length;
+                    if (ownedTotal > 0 && ownedTotal < ownedHave) {
+                        setTimeout(() => { void fetchCollectionAndWishlist(true); }, 1500);
+                    }
+                    if (fresh.length) {
+                        const freshKeys = new Set<string>(fresh.map((c) => c.tralbumType + c.tralbumId));
+                        const merged = [...fresh, ...cached.filter((c: any) => !freshKeys.has(c.tralbumType + c.tralbumId))];
+                        const total = merged.length;
+                        sendCollItems(fresh, total, total);
+                        collectionItemsDisk.replace(merged);
+                        return { ok: true, count: total };
+                    }
+                } catch { /* cache alone is fine */ }
+                return { ok: true, count: cached.length, cached: true };
             }
-        } catch (err: any) {
-            if (devMode) console.log('[bcrpc] collection:fetch FAILED ' + (err && (err.message || err)));
+            // no cache (or forced rescan): full paginated fetch of both lists
+            try {
+                const owned = await bandcampApi.fetchCollection(20000, sendCollItems, undefined, 'collection');
+                const ownedKeys = new Set<string>(owned.map((c) => c.tralbumType + c.tralbumId));
+                const wishRaw = await bandcampApi.fetchCollection(20000, sendCollItems, undefined, 'wishlist');
+                const wish = wishRaw.filter((c) => !ownedKeys.has(c.tralbumType + c.tralbumId));
+                const items = [...owned, ...wish];
+                if (devMode) console.log('[bcrpc] collection:fetch ' + owned.length + ' owned + ' + wish.length + ' wishlist');
+                if (items.length) {
+                    if (cacheReleasesOn()) collectionItemsDisk.replace(items);
+                    // a re-scan is the source of truth: drop anything the view still
+                    // shows that bandcamp no longer lists (hidden / un-wishlisted)
+                    if (collectionView && !collectionView.webContents.isDestroyed()) {
+                        collectionView.webContents.send('collection:prune', items.map((c) => c.tralbumType + c.tralbumId));
+                    }
+                    return { ok: true, count: items.length };
+                }
+            } catch (err: any) {
+                if (devMode) console.log('[bcrpc] collection:fetch FAILED ' + (err && (err.message || err)));
+            }
+            return { ok: false, count: 0, error: 'fetch failed' };
+        } finally {
+            collFetchActive = false;
         }
-        return { ok: false, count: 0, error: 'fetch failed' };
-    });
+    };
+    ipcMain.handle('collection:fetch', (_e, fullRescan: unknown) => fetchCollectionAndWishlist(fullRescan === true));
+    {
+        let collectTimer: ReturnType<typeof setTimeout> | null = null;
+        let collectRemoval = false;
+        onCollectAction = (removal: boolean) => {
+            collectRemoval = collectRemoval || removal;
+            if (collectTimer) clearTimeout(collectTimer);
+            // small delay so bandcamp finishes committing the change first
+            collectTimer = setTimeout(() => {
+                const full = collectRemoval;
+                collectRemoval = false;
+                void fetchCollectionAndWishlist(full);
+            }, 3000);
+        };
+    }
 
     // resolve a collection item to a full tracklist. a purchased TRACK that's part
     // of an album carries no artist/art of its own, so resolve it through its parent
@@ -1180,7 +1241,11 @@ async function init() {
                     releaseIndexDisk.save();
                     await rest(CHUNK_REST_S, 'chunk done');
                 }
-                await idxSleep(300); // pacing between releases
+                // adaptive pacing: an idle user's budget goes to the crawl (fast,
+                // the 429 backoff is the brake); an actively browsing user keeps
+                // the budget & the crawl slows right down
+                const idleMs = bandcampApi.interactiveIdleMs();
+                await idxSleep(idleMs > 120_000 ? 200 : idleMs > 30_000 ? 600 : 1500);
             }
         } finally {
             send(pending.splice(0));
@@ -1357,24 +1422,164 @@ async function init() {
 
     // downloads land in the chosen (or os default) folder w/o a save dialog, and
     // report progress to the header so there's a visible indicator
+    // downloads registry: everything ever downloaded this session, with live
+    // status, backing the header's downloads panel. Clear drops finished entries.
+    interface DlEntry { id: number; name: string; state: string; percent: number; file: string; at: number }
+    const dlRegistry: DlEntry[] = [];
+    let dlSeq = 0;
+    let downloadsWin: BrowserWindow | null = null;
+    const broadcastDownloads = () => {
+        if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.webContents.send('downloads:list', dlRegistry);
+    };
     session.on('will-download', (_e, item) => {
         const name = item.getFilename();
         try { item.setSavePath(path.join(getDownloadDir(), name)); } catch { /* let electron pick */ }
+        const entry: DlEntry = { id: ++dlSeq, name, state: 'progressing', percent: 0, file: '', at: Date.now() };
+        dlRegistry.unshift(entry);
         const send = (o: any) => {
             if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('download:progress', o);
+            broadcastDownloads();
         };
         send({ name, percent: 0, state: 'progressing' });
         item.on('updated', (_ev, state) => {
             if (state !== 'progressing') return;
             const total = item.getTotalBytes();
             const percent = total > 0 ? Math.floor((item.getReceivedBytes() / total) * 100) : -1;
+            entry.percent = Math.max(0, percent);
             send({ name, percent, state: 'progressing' });
         });
         item.on('done', (_ev, state) => {
+            entry.state = state;
+            entry.percent = 100;
+            try { entry.file = item.getSavePath(); } catch { /* keep '' */ }
             send({ name, percent: 100, state });
             if (state === 'completed') pageToast('downloaded ' + name);
             if (devMode) console.log('[bcrpc] download ' + state + ' ' + name);
         });
+    });
+
+    // downloads panel (small anchored window listing the registry)
+    ipcMain.on('downloads:toggle', () => {
+        if (downloadsWin && !downloadsWin.isDestroyed()) { downloadsWin.close(); return; }
+        try {
+            const b = mainWindow.getContentBounds();
+            downloadsWin = new BrowserWindow({
+                width: 360, height: 320, frame: false, resizable: false, parent: mainWindow,
+                x: Math.max(0, b.x + b.width - 372), y: b.y + 44,
+                backgroundColor: '#181a1b',
+                webPreferences: { nodeIntegration: true, contextIsolation: false },
+            });
+            downloadsWin.loadFile(path.join(__dirname, 'downloads', 'downloads.html'));
+            downloadsWin.on('closed', () => {
+                downloadsWin = null;
+                if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', false);
+            });
+            downloadsWin.webContents.on('did-finish-load', () => broadcastDownloads());
+            if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', true);
+        } catch { downloadsWin = null; }
+    });
+    ipcMain.on('downloads:close', () => { if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.close(); });
+    ipcMain.handle('downloads:get', () => dlRegistry);
+    ipcMain.on('downloads:clear', () => {
+        // keep in-flight entries; clear finished/failed
+        for (let i = dlRegistry.length - 1; i >= 0; i--) {
+            if (dlRegistry[i].state !== 'progressing') dlRegistry.splice(i, 1);
+        }
+        broadcastDownloads();
+    });
+    ipcMain.on('downloads:open-file', (_e, file: unknown) => {
+        if (typeof file === 'string' && file && fs.existsSync(file)) shell.showItemInFolder(file);
+    });
+
+    // --- stream downloads (unowned releases, bandcamp-downloader style) ------
+    // downloads a release's mp3-128 streams with ID3 tags (album/artist/album
+    // artist/title/track no/year/lyrics when published), embeds the cover, saves
+    // cover.jpg alongside, and writes a playlist file (settings: m3u/pls/wpl/zpl).
+    // progress is tracked in the downloads panel like any other download.
+    const sanitizeName = (x: string) => (x || '').replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) || 'untitled';
+    let streamDlActive = false;
+    const startStreamDownload = async (req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }): Promise<{ ok: boolean; count?: number; error?: string }> => {
+        if (streamDlActive) return { ok: false, error: 'a download is already running' };
+        const rel = await bandcampApi.fetchReleaseForDownload(req);
+        if (!rel.ok) return { ok: false, error: rel.error };
+        streamDlActive = true;
+        const entry = { id: ++dlSeq, name: `${rel.albumArtist} — ${rel.album}`, state: 'progressing', percent: 0, file: '', at: Date.now() };
+        dlRegistry.unshift(entry);
+        const prog = (state: string, percent: number, name: string) => {
+            entry.state = state;
+            entry.percent = Math.max(0, percent);
+            if (headerView && !headerView.webContents.isDestroyed()) {
+                headerView.webContents.send('download:progress', { state, percent, name });
+            }
+            broadcastDownloads();
+        };
+        void (async () => {
+            try {
+                const dir = path.join(getDownloadDir(), sanitizeName(rel.albumArtist), sanitizeName(rel.album));
+                fs.mkdirSync(dir, { recursive: true });
+                entry.file = dir;
+                let art: Buffer | null = null;
+                if (rel.artUrl) {
+                    art = await bandcampApi.fetchBinary(rel.artUrl);
+                    if (art && art.length) { try { fs.writeFileSync(path.join(dir, 'cover.jpg'), art); } catch { /* disk */ } }
+                }
+                const files: { file: string; title: string; artist: string; duration: number }[] = [];
+                for (let i = 0; i < rel.tracks.length; i++) {
+                    const t = rel.tracks[i];
+                    prog('progressing', Math.round((i / rel.tracks.length) * 100), `${t.title} (${i + 1}/${rel.tracks.length})`);
+                    const buf = await bandcampApi.fetchBinary(t.stream);
+                    if (!buf || !buf.length) continue; // stream expired/refused: skip, keep going
+                    const tag = buildId3v23({
+                        title: t.title, artist: t.artist, albumArtist: rel.albumArtist, album: rel.album,
+                        trackNum: t.trackNum, trackTotal: rel.tracks.length, year: rel.year,
+                        lyrics: t.lyrics, art: art || undefined,
+                    });
+                    const file = path.join(dir, `${String(t.trackNum).padStart(2, '0')} - ${sanitizeName(t.title)}.mp3`);
+                    fs.writeFileSync(file, Buffer.concat([tag, buf]));
+                    files.push({ file, title: t.title, artist: t.artist, duration: t.duration });
+                    await new Promise((res) => setTimeout(res, 250)); // gentle on the cdn
+                }
+                writePlaylistFile(dir, rel.album, files);
+                prog(files.length ? 'completed' : 'interrupted', 100, `${rel.album} (${files.length}/${rel.tracks.length} tracks)`);
+            } catch (err: any) {
+                if (devMode) console.log('[bcrpc] stream download FAILED ' + (err && (err.message || err)));
+                prog('interrupted', 0, rel.album);
+            } finally {
+                streamDlActive = false;
+            }
+        })();
+        return { ok: true, count: rel.tracks.length };
+    };
+    // playlist file in the chosen settings format, next to the tracks
+    function writePlaylistFile(dir: string, album: string, files: { file: string; title: string; artist: string; duration: number }[]): void {
+        const fmt = String(store.get('dlPlaylistFormat', 'm3u'));
+        if (fmt === 'none' || !files.length) return;
+        const names = files.map((f) => path.basename(f.file));
+        let out = '';
+        if (fmt === 'pls') {
+            out = '[playlist]\n' + files.map((f, i) =>
+                `File${i + 1}=${names[i]}\nTitle${i + 1}=${f.artist} - ${f.title}\nLength${i + 1}=${f.duration || -1}`).join('\n') +
+                `\nNumberOfEntries=${files.length}\nVersion=2\n`;
+        } else if (fmt === 'wpl' || fmt === 'zpl') {
+            const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            out = `<?wpl version="1.0"?>\n<smil>\n<head><title>${esc(album)}</title></head>\n<body><seq>\n` +
+                names.map((n) => `<media src="${esc(n)}"/>`).join('\n') + '\n</seq></body>\n</smil>\n';
+        } else { // m3u (default)
+            out = '#EXTM3U\n' + files.map((f, i) =>
+                `#EXTINF:${f.duration || -1},${f.artist} - ${f.title}\n${names[i]}`).join('\n') + '\n';
+        }
+        try { fs.writeFileSync(path.join(dir, sanitizeName(album) + '.' + fmt), out, 'utf8'); } catch { /* disk */ }
+    }
+    ipcMain.handle('download:release', (_e, req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }) => startStreamDownload(req || {}));
+
+    // ownership check for the on-page download button: owned collection items
+    // carry their bandcamp redownload page url
+    ipcMain.handle('release:download-info', (_e, req: { tralbumId?: string; tralbumType?: string }) => {
+        const id = toIdStr(req?.tralbumId);
+        const type = req?.tralbumType === 't' ? 't' : 'a';
+        if (!id) return { owned: false };
+        const hit = collectionItemsDisk.get().find((c: any) => !c.wish && c.tralbumType === type && c.tralbumId === id && c.downloadUrl);
+        return hit ? { owned: true, downloadUrl: hit.downloadUrl } : { owned: false };
     });
 
     // list the formats a purchased item offers (from its download page)
@@ -1401,7 +1606,22 @@ async function init() {
     });
 
     // custom player is single source of now playing truth. drives discord rich presence & last.fm scrobbling
+    // the release page's inline player mirrors OUR playback (the preload updates
+    // its play state / progress / times from these)
+    ipcMain.on('player:seek-frac', (_e, frac: unknown) => {
+        if (playerView && !playerView.webContents.isDestroyed()) {
+            playerView.webContents.send('player:seek-frac', Number(frac) || 0);
+        }
+    });
     ipcMain.on('player:now-playing', (_e, track: NowPlaying) => {
+        for (const t of tabs) {
+            if (!t.view.webContents.isDestroyed()) {
+                t.view.webContents.send('page:now-playing', {
+                    url: track.url, title: track.title, position: track.position,
+                    duration: track.duration, isPlaying: track.isPlaying,
+                });
+            }
+        }
         presenceService.update(track);
         lastfmService.updateNowPlaying(track);
         lastfmService.maybeScrobble(track);
@@ -1463,6 +1683,7 @@ async function init() {
             cacheReleases: cacheReleasesOn(),
             gridHeaders: store.get('gridHeaders', false) === true,
             headerButtons: getHeaderButtons(),
+            dlPlaylistFormat: String(store.get('dlPlaylistFormat', 'm3u')),
             downloadDir: getDownloadDir(),
             theme: getTheme(),
             darkArtistPages: store.get('darkArtistPages', false) === true,
@@ -1481,6 +1702,7 @@ async function init() {
                 presenceService.reconnect(); // apply new app id now
             }
             if (typeof data.autoLoadCollection === 'boolean') store.set('autoLoadCollection', data.autoLoadCollection);
+            if (typeof data.dlPlaylistFormat === 'string' && ['m3u', 'pls', 'wpl', 'zpl', 'none'].includes(data.dlPlaylistFormat)) store.set('dlPlaylistFormat', data.dlPlaylistFormat);
             if (typeof data.cacheReleases === 'boolean') {
                 const wasOn = cacheReleasesOn();
                 store.set('cacheReleases', data.cacheReleases);
@@ -1576,7 +1798,7 @@ async function init() {
         // nav invalidates in-flight extractor results (late trap must not load into player after moving on)
         wc.on('did-start-navigation', (...args: any[]) => {
             const isMainFrame = args.length >= 4 ? Boolean(args[3]) : true;
-            if (isMainFrame && isActive()) { trapSeq++; userGestureAt = 0; }
+            if (isMainFrame && isActive()) { trapSeq++; userGestureAt = 0; bandcampApi.noteInteractive(); }
         });
 
         // open-in-new: bandcamp links -> new in-app tab; external links -> new window; plain foreground links stay in place
@@ -1598,6 +1820,8 @@ async function init() {
             const tmpl: Electron.MenuItemConstructorOptions[] = [];
             if (linkIsRelease) tmpl.push({ label: 'Add to queue', click: () => enqueueFromUrl(link) });
             else if (pageIsRelease) tmpl.push({ label: 'Add this release to queue', click: () => enqueueFromUrl(pageUrl) });
+            if (linkIsRelease) tmpl.push({ label: 'Download release (mp3-128)', click: () => { void startStreamDownload({ url: link }); } });
+            else if (pageIsRelease) tmpl.push({ label: 'Download this release (mp3-128)', click: () => { void startStreamDownload({ url: pageUrl }); } });
             if (link) {
                 if (tmpl.length) tmpl.push({ type: 'separator' });
                 tmpl.push({ label: 'Copy link', click: () => { clipboard.writeText(link); pageToast('link copied'); } });
@@ -1690,6 +1914,31 @@ async function init() {
                 antiFlashKeys.set(wc, key);
                 if (!isLight) liftCloakIfStuck();
             } catch (err) { console.error('Failed to inject Pre-Theme CSS:', err); }
+        });
+
+        // a page navigation that itself gets HTTP 429 renders an empty shell that
+        // the dark cloak turns into a silent grey hang. say WHY and offer reload.
+        wc.on('did-navigate', (_e: any, _url: string, httpResponseCode: number) => {
+            if (httpResponseCode !== 429) return;
+            try { bandcampApi.on429?.(); } catch { /* notice best-effort */ }
+            setTimeout(() => {
+                if (wc.isDestroyed()) return;
+                const key = antiFlashKeys.get(wc);
+                if (key) { wc.removeInsertedCSS(key).catch(() => {}); antiFlashKeys.delete(wc); }
+                wc.executeJavaScript(`(function () {
+                    if (document.getElementById('bcrpc-429')) return;
+                    var d = document.createElement('div');
+                    d.id = 'bcrpc-429';
+                    d.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#181a1b;color:#e8e6e3;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
+                    d.innerHTML = '<div style="max-width:440px;padding:24px;text-align:center;">' +
+                        '<div style="font-size:18px;font-weight:600;margin-bottom:10px;">Error 429 — too many requests</div>' +
+                        '<div style="font-size:13px;color:#9a968e;line-height:1.6;">Bandcamp is throttling this session, so this page could not load. Wait a little bit T__T and try again.</div>' +
+                        '<button onclick="location.reload()" style="margin-top:16px;background:#1da0c3;border:none;color:#fff;border-radius:6px;padding:9px 16px;font-size:13px;cursor:pointer;">Reload page</button></div>';
+                    (document.body || document.documentElement).appendChild(d);
+                    var st = document.createElement('style'); st.textContent = 'body{opacity:1 !important}';
+                    document.documentElement.appendChild(st);
+                })()`).catch(() => { /* view navigated away */ });
+            }, 250);
         });
 
         wc.on('before-input-event', (event, input) => {

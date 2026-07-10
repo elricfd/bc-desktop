@@ -7,11 +7,14 @@ const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const grid = $('grid');
 const searchEl = $('search') as HTMLInputElement;
 const sortEl = $('sort') as HTMLSelectElement;
+const scopeEl = $('scope') as HTMLSelectElement;
 const dirBtn = $('dir');
 const countEl = $('count');
 
 let items: CollectionItem[] = [];
+const itemKeys = new Map<string, number>(); // key -> index into items
 let loading = false;
+let fullRescan = false; // set by shift+Reload
 let descending = true;
 let expected = 0; 
 let currentlyRenderedCount = 0;
@@ -28,13 +31,24 @@ async function load(): Promise<void> {
     if (loading || items.length) return;
     loading = true;
     items = [];
+    itemKeys.clear();
     expected = 0;
     currentlyRenderedCount = 0;
     setState('loading your collection…');
     ipcRenderer.send('collection:log', 'fetch start');
     
     const onItems = (_e: unknown, p: { items: CollectionItem[]; soFar: number; total: number }) => {
-        if (p?.items?.length) items.push(...p.items);
+        for (const it of p?.items || []) {
+            const key = it.tralbumType + it.tralbumId;
+            const existing = itemKeys.get(key);
+            if (existing !== undefined) {
+                // wishlist item got purchased (or metadata refreshed): update in place
+                items[existing] = { ...items[existing], ...it };
+                continue;
+            }
+            itemKeys.set(key, items.length);
+            items.push(it);
+        }
         if (p?.total) expected = p.total;
         
         // CRITICAL: Soft render. Only append new items to avoid destroying the open tracklist.
@@ -44,7 +58,8 @@ async function load(): Promise<void> {
     ipcRenderer.on('collection:items', onItems);
     
     try {
-        const res: { ok: boolean; count: number; error?: string } = await ipcRenderer.invoke('collection:fetch');
+        const res: { ok: boolean; count: number; error?: string } = await ipcRenderer.invoke('collection:fetch', fullRescan);
+        fullRescan = false;
         ipcRenderer.send('collection:log', 'fetch done ok=' + res.ok + ' n=' + items.length + (res.error ? ' err=' + res.error : ''));
         if (!res.ok && !items.length) { setState('could not load the collection' + (res.error ? ': ' + res.error : '') + '. are you logged in on bandcamp?'); return; }
         if (!items.length) { setState('no items found. are you logged in on bandcamp?'); return; }
@@ -88,6 +103,9 @@ function sortedFiltered(): CollectionItem[] {
     const q = searchEl.value.trim().toLowerCase();
     const key = sortEl.value;
     let list = items;
+    // owned / wishlist scope
+    if (scopeEl.value === 'own') list = list.filter((i) => !i.wish);
+    else if (scopeEl.value === 'wish') list = list.filter((i) => i.wish === true);
     // match artist/title always; genre tags & track titles once the search index
     // (built in the background, cached on disk) has that item
     if (q) list = list.filter((i) =>
@@ -189,12 +207,33 @@ function createCard(it: CollectionItem): HTMLElement {
     });
     wrap.appendChild(enq);
     
+    if (it.wish) {
+        const b = document.createElement('span');
+        b.className = 'wishb';
+        b.title = 'on your wishlist';
+        b.textContent = '♡';
+        wrap.appendChild(b);
+    }
     if (it.downloadUrl) {
         const dl = document.createElement('button');
         dl.className = 'dl';
         dl.title = 'download';
         dl.textContent = '⤓';
         dl.addEventListener('click', (e) => { e.stopPropagation(); openDownloadMenu(it, dl); });
+        wrap.appendChild(dl);
+    } else if (it.wish) {
+        // not owned: download the mp3-128 streams instead (tagged, with cover)
+        const dl = document.createElement('button');
+        dl.className = 'dl';
+        dl.title = 'download streams (mp3-128, tagged)';
+        dl.textContent = '⤓';
+        dl.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            dl.textContent = '…';
+            const r = await ipcRenderer.invoke('download:release', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, url: it.url });
+            dl.textContent = r && r.ok ? '✓' : '×';
+            setTimeout(() => { dl.textContent = '⤓'; }, 1200);
+        });
         wrap.appendChild(dl);
     }
     card.appendChild(wrap);
@@ -775,13 +814,35 @@ ipcRenderer.on('collection:years', (_e, updates: { tralbumId: string; year: numb
 
 searchEl.addEventListener('input', forceRender);
 sortEl.addEventListener('change', () => { if (sortEl.value === 'year') requestYears(); forceRender(); });
+scopeEl.addEventListener('change', forceRender);
 dirBtn.addEventListener('click', () => {
     descending = !descending;
     dirBtn.textContent = descending ? '↓' : '↑';
     forceRender();
 });
-$('refresh').addEventListener('click', () => { items = []; yearsRequested = false; load(); });
+$('refresh').addEventListener('click', (e) => {
+    fullRescan = (e as MouseEvent).shiftKey; // shift+click re-scans everything
+    items = [];
+    itemKeys.clear();
+    yearsRequested = false;
+    load();
+});
 $('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
+
+// incremental refreshes (wishlist hearts, purchases) stream in outside load()
+ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
+    if (loading) return; // load() has its own listener with progress accounting
+    let added = 0;
+    for (const it of p?.items || []) {
+        const key = it.tralbumType + it.tralbumId;
+        const existing = itemKeys.get(key);
+        if (existing !== undefined) { items[existing] = { ...items[existing], ...it }; continue; }
+        itemKeys.set(key, items.length);
+        items.push(it);
+        added++;
+    }
+    if (added || (p?.items || []).length) forceRender();
+});
 
 ipcRenderer.on('collection:load', () => load());
 ipcRenderer.on('collection:shown', () => { if (!items.length) load(); });
