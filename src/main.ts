@@ -1532,6 +1532,17 @@ async function init() {
         }
     });
 
+    // the popup measures its real content and asks for that height (the old
+    // main-side row estimate under-sized the empty state, showing a phantom
+    // scrollbar). clamped; >4 rows caps renderer-side so the list scrolls.
+    ipcMain.on('downloads:resize', (_e, h: unknown) => {
+        if (!downloadsWin || downloadsWin.isDestroyed()) return;
+        const want = Math.max(80, Math.min(600, Math.round(Number(h) || 0)));
+        if (!want) return;
+        const b = mainWindow.getContentBounds();
+        downloadsWin.setBounds({ width: 360, height: want, x: Math.max(0, b.x + b.width - 372), y: b.y + 44 });
+    });
+
     ipcMain.on('downloads:cancel', (_e, id: number) => {
         const entry = dlRegistry.find(d => d.id === id);
         if (entry && entry.state === 'progressing') {
