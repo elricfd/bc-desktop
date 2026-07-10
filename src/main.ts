@@ -1641,10 +1641,18 @@ async function init() {
                 const fileFmt = store.get('fileNameFmt', '{tracknum} {artist} - {title}') as string;
                 const folderFmt = store.get('folderNameFmt', '{artist}/{album}') as string;
                 const modifyTags = store.get('modifyTags', true) !== false;
+                // per-tag toggles + cover/playlist options (BandcampDownloader-style)
+                const tagOn = (k: string) => store.get(k, true) !== false;
+                const coverInTags = tagOn('coverInTags');
+                const coverInFolder = tagOn('coverInFolder');
+                const coverNameFmt = String(store.get('coverNameFmt', 'cover') || 'cover');
+                const playlistNameFmt = String(store.get('playlistNameFmt', '{album}') || '{album}');
 
                 const formatPath = (fmt: string) => {
-                    return (fmt || '').replace(/\{artist\}/gi, sanitizeName(rel.albumArtist))
-                                      .replace(/\{album\}/gi, sanitizeName(rel.album));
+                    return (fmt || '').replace(/\{albumartist\}/gi, sanitizeName(rel.albumArtist))
+                                      .replace(/\{artist\}/gi, sanitizeName(rel.albumArtist))
+                                      .replace(/\{album\}/gi, sanitizeName(rel.album))
+                                      .replace(/\{year\}/gi, rel.year ? String(rel.year) : '');
                 };
 
                 const dir = path.join(getDownloadDir(), formatPath(folderFmt));
@@ -1652,9 +1660,11 @@ async function init() {
                 entry.file = dir;
                 
                 let art: Buffer | null = null;
-                if (rel.artUrl) {
+                if (rel.artUrl && (coverInTags || coverInFolder)) {
                     art = await bandcampApi.fetchBinary(rel.artUrl);
-                    if (art && art.length) { try { fs.writeFileSync(path.join(dir, 'cover.jpg'), art); } catch { /* disk */ } }
+                    if (art && art.length && coverInFolder) {
+                        try { fs.writeFileSync(path.join(dir, (sanitizeName(formatPath(coverNameFmt)) || 'cover') + '.jpg'), art); } catch { /* disk */ }
+                    }
                 }
                 
                 const files: { file: string; title: string; artist: string; duration: number }[] = [];
@@ -1678,9 +1688,11 @@ async function init() {
                     if (!buf || !buf.length) continue; 
                     
                     const formatFileName = (fmt: string, trackTitle: string, trackArtist: string, trackNum: string) => {
-                        let name = (fmt || '{tracknum} {artist} - {title}').replace(/\{artist\}/gi, sanitizeName(trackArtist))
+                        let name = (fmt || '{tracknum} {artist} - {title}').replace(/\{albumartist\}/gi, sanitizeName(rel.albumArtist))
+                            .replace(/\{artist\}/gi, sanitizeName(trackArtist))
                             .replace(/\{album\}/gi, sanitizeName(rel.album))
                             .replace(/\{title\}/gi, sanitizeName(trackTitle))
+                            .replace(/\{year\}/gi, rel.year ? String(rel.year) : '')
                             .replace(/\{tracknum\}/gi, trackNum.padStart(2, '0'));
                         if (!name.toLowerCase().endsWith('.mp3')) name += '.mp3';
                         return name;
@@ -1690,10 +1702,17 @@ async function init() {
                     const file = path.join(dir, fileName);
 
                     if (modifyTags) {
+                        // an unticked tag simply isn't written
                         const tag = buildId3v23({
-                            title: t.title, artist: t.artist, albumArtist: rel.albumArtist, album: rel.album,
-                            trackNum: t.trackNum, trackTotal: rel.tracks.length, year: rel.year,
-                            lyrics: t.lyrics, art: art || undefined,
+                            title: tagOn('tagTitle') ? t.title : '',
+                            artist: tagOn('tagArtist') ? t.artist : '',
+                            albumArtist: tagOn('tagAlbumArtist') ? rel.albumArtist : '',
+                            album: tagOn('tagAlbum') ? rel.album : '',
+                            trackNum: tagOn('tagTrackNum') ? t.trackNum : 0,
+                            trackTotal: tagOn('tagTrackNum') ? rel.tracks.length : undefined,
+                            year: tagOn('tagYear') ? rel.year : 0,
+                            lyrics: tagOn('tagLyrics') ? t.lyrics : '',
+                            art: coverInTags ? (art || undefined) : undefined,
                         });
                         fs.writeFileSync(file, Buffer.concat([tag, buf]));
                     } else {
@@ -1705,7 +1724,7 @@ async function init() {
                 }
 
                 if (!dlState.canceled) {
-                    writePlaylistFile(dir, rel.album, files);
+                    writePlaylistFile(dir, sanitizeName(formatPath(playlistNameFmt)) || sanitizeName(rel.album), rel.album, files);
                     prog(files.length ? 'completed' : 'interrupted', 100, `${rel.album} (${files.length}/${rel.tracks.length} tracks)`);
                 }
             } catch (err: any) {
@@ -1720,7 +1739,7 @@ async function init() {
         return { ok: true, count: rel.tracks.length };
     };
     // playlist file in the chosen settings format, next to the tracks
-    function writePlaylistFile(dir: string, album: string, files: { file: string; title: string; artist: string; duration: number }[]): void {
+    function writePlaylistFile(dir: string, baseName: string, album: string, files: { file: string; title: string; artist: string; duration: number }[]): void {
         const fmt = String(store.get('dlPlaylistFormat', 'm3u'));
         if (fmt === 'none' || !files.length) return;
         const names = files.map((f) => path.basename(f.file));
@@ -1737,7 +1756,7 @@ async function init() {
             out = '#EXTM3U\n' + files.map((f, i) =>
                 `#EXTINF:${f.duration || -1},${f.artist} - ${f.title}\n${names[i]}`).join('\n') + '\n';
         }
-        try { fs.writeFileSync(path.join(dir, sanitizeName(album) + '.' + fmt), out, 'utf8'); } catch { /* disk */ }
+        try { fs.writeFileSync(path.join(dir, (baseName || sanitizeName(album)) + '.' + fmt), out, 'utf8'); } catch { /* disk */ }
     }
     ipcMain.handle('download:release', (_e, req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }) => startStreamDownload(req || {}));
 
@@ -1853,6 +1872,17 @@ async function init() {
             fileNameFmt: store.get('fileNameFmt', '{tracknum} {artist} - {title}'),
             folderNameFmt: store.get('folderNameFmt', '{artist}/{album}'),
             modifyTags: store.get('modifyTags', true) !== false,
+            tagTitle: store.get('tagTitle', true) !== false,
+            tagArtist: store.get('tagArtist', true) !== false,
+            tagAlbumArtist: store.get('tagAlbumArtist', true) !== false,
+            tagAlbum: store.get('tagAlbum', true) !== false,
+            tagYear: store.get('tagYear', true) !== false,
+            tagTrackNum: store.get('tagTrackNum', true) !== false,
+            tagLyrics: store.get('tagLyrics', true) !== false,
+            coverInTags: store.get('coverInTags', true) !== false,
+            coverInFolder: store.get('coverInFolder', true) !== false,
+            coverNameFmt: String(store.get('coverNameFmt', 'cover')),
+            playlistNameFmt: String(store.get('playlistNameFmt', '{album}')),
             gridHeaders: store.get('gridHeaders', false) === true,
             headerButtons: getHeaderButtons(),
             dlPlaylistFormat: String(store.get('dlPlaylistFormat', 'm3u')),
@@ -1870,6 +1900,11 @@ async function init() {
             if (typeof data.fileNameFmt === 'string') store.set('fileNameFmt', data.fileNameFmt);
             if (typeof data.folderNameFmt === 'string') store.set('folderNameFmt', data.folderNameFmt);
             if (typeof data.modifyTags === 'boolean') store.set('modifyTags', data.modifyTags);
+            for (const k of ['tagTitle', 'tagArtist', 'tagAlbumArtist', 'tagAlbum', 'tagYear', 'tagTrackNum', 'tagLyrics', 'coverInTags', 'coverInFolder']) {
+                if (typeof data[k] === 'boolean') store.set(k, data[k]);
+            }
+            if (typeof data.coverNameFmt === 'string') store.set('coverNameFmt', data.coverNameFmt.trim() || 'cover');
+            if (typeof data.playlistNameFmt === 'string') store.set('playlistNameFmt', data.playlistNameFmt.trim() || '{album}');
             if (typeof data.discordEnabled === 'boolean') store.set('discordEnabled', data.discordEnabled);
             if (typeof data.closeToTray === 'boolean') store.set('closeToTray', data.closeToTray);
             if (typeof data.discordClientId === 'string') {

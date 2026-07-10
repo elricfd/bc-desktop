@@ -68,7 +68,7 @@
     <script>
         const { ipcRenderer } = require('electron');
         const list = document.getElementById('list');
-        const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&', '<': '<', '>': '>', '"': '"' }[c]));
+        const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
         
         function render(items) {
             if (!items || !items.length) { list.innerHTML = '<div class="state">no downloads yet</div>'; return; }

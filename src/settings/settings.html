@@ -134,8 +134,23 @@
         <input type="text" id="fileNameFmt" placeholder="{tracknum} {artist} - {title}" autocomplete="off">
         <label style="margin-top:10px;">Folder Format</label>
         <input type="text" id="folderNameFmt" placeholder="{artist}/{album}" autocomplete="off">
-        <div class="hint" style="margin:6px 0 0;">Tokens available: {artist}, {album}, {title}, {tracknum}</div>
-        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="modifyTags"> Write ID3 metadata tags (Title, Artist, Album, Cover) to stream downloads</label>
+        <div class="hint" style="margin:6px 0 0;">Tokens available: {artist}, {albumartist}, {album}, {title}, {tracknum}, {year}</div>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="modifyTags"> Write ID3 metadata tags to stream downloads</label>
+        <div id="tagOpts" style="margin:8px 0 0 24px;display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;">
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagTitle"> title</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagArtist"> artist</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagAlbumArtist"> album artist</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagAlbum"> album</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagYear"> year</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagTrackNum"> track number</label>
+            <label class="toggle" style="margin:0;"><input type="checkbox" id="tagLyrics"> lyrics (when published)</label>
+        </div>
+        <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="coverInTags"> embed cover art in the tags</label>
+        <label class="toggle" style="margin-top:10px;"><input type="checkbox" id="coverInFolder"> save cover art in the folder</label>
+        <label style="margin-top:10px;">Cover art filename</label>
+        <input type="text" id="coverNameFmt" placeholder="cover" autocomplete="off">
+        <label style="margin-top:10px;">Playlist filename</label>
+        <input type="text" id="playlistNameFmt" placeholder="{album}" autocomplete="off">
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
         <label class="toggle"><input type="checkbox" id="cacheReleases"> permanently cache release data on this computer (covers, tracklists, album info — never audio)</label>
         <label style="margin-top:10px;">Cache location</label>
@@ -268,6 +283,15 @@
             $('fileNameFmt').value = s.fileNameFmt || '{tracknum} {artist} - {title}';
             $('folderNameFmt').value = s.folderNameFmt || '{artist}/{album}';
             $('modifyTags').checked = s.modifyTags !== false;
+            for (const k of ['tagTitle', 'tagArtist', 'tagAlbumArtist', 'tagAlbum', 'tagYear', 'tagTrackNum', 'tagLyrics', 'coverInTags', 'coverInFolder']) {
+                $(k).checked = s[k] !== false;
+            }
+            $('coverNameFmt').value = s.coverNameFmt || 'cover';
+            $('playlistNameFmt').value = s.playlistNameFmt || '{album}';
+            // the per-tag list only matters while tag writing is on
+            const syncTagOpts = () => { $('tagOpts').style.opacity = $('modifyTags').checked ? '1' : '.4'; };
+            $('modifyTags').addEventListener('change', syncTagOpts);
+            syncTagOpts();
         }
 
         async function persist() {
@@ -282,6 +306,17 @@
                 fileNameFmt: $('fileNameFmt').value.trim() || '{tracknum} {artist} - {title}',
                 folderNameFmt: $('folderNameFmt').value.trim() || '{artist}/{album}',
                 modifyTags: $('modifyTags').checked,
+                tagTitle: $('tagTitle').checked,
+                tagArtist: $('tagArtist').checked,
+                tagAlbumArtist: $('tagAlbumArtist').checked,
+                tagAlbum: $('tagAlbum').checked,
+                tagYear: $('tagYear').checked,
+                tagTrackNum: $('tagTrackNum').checked,
+                tagLyrics: $('tagLyrics').checked,
+                coverInTags: $('coverInTags').checked,
+                coverInFolder: $('coverInFolder').checked,
+                coverNameFmt: $('coverNameFmt').value.trim() || 'cover',
+                playlistNameFmt: $('playlistNameFmt').value.trim() || '{album}',
                 headerButtons: currentHbState,
                 closeToTray: $('closeToTray').checked,
                 autoLoadCollection: $('autoLoadCollection').checked,
