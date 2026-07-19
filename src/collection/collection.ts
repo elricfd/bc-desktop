@@ -1,5 +1,5 @@
 import { ipcRenderer } from 'electron';
-import type { CollectionItem } from '../shared/types';
+import type { CollectionItem, TralbumType } from '../shared/types';
 
 ipcRenderer.send('collection:log', 'booted');
 
@@ -103,9 +103,10 @@ function sortedFiltered(): CollectionItem[] {
     const q = searchEl.value.trim().toLowerCase();
     const key = sortEl.value;
     let list = items;
-    // owned / wishlist scope
-    if (scopeEl.value === 'own') list = list.filter((i) => !i.wish);
+    // owned / wishlist / local-files scope
+    if (scopeEl.value === 'own') list = list.filter((i) => !i.wish && !i.local);
     else if (scopeEl.value === 'wish') list = list.filter((i) => i.wish === true);
+    else if (scopeEl.value === 'local') list = list.filter((i) => i.local === true);
     // match artist/title always; genre tags & track titles once the search index
     // (built in the background, cached on disk) has that item
     if (q) list = list.filter((i) =>
@@ -214,6 +215,13 @@ function createCard(it: CollectionItem): HTMLElement {
         b.textContent = '♡';
         wrap.appendChild(b);
     }
+    if (it.local) {
+        const b = document.createElement('span');
+        b.className = 'localb';
+        b.title = 'from your local files';
+        b.textContent = 'LOCAL';
+        wrap.appendChild(b);
+    }
     if (it.downloadUrl) {
         const dl = document.createElement('button');
         dl.className = 'dl';
@@ -246,7 +254,40 @@ function createCard(it: CollectionItem): HTMLElement {
     card.appendChild(meta);
     
     card.addEventListener('click', () => toggleTracklist(it, card));
+    // right-click a cover: add the whole release to a playlist (local cards get
+    // a small menu with a "remove from library" entry too)
+    card.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (it.local) openLocalCardMenu(e, it);
+        else openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY);
+    });
     return card;
+}
+
+// right-click menu for local pseudo-releases
+function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'dlmenu';
+    menu.addEventListener('click', (ev) => ev.stopPropagation());
+    const mk = (label: string, fn: () => void) => {
+        const b = document.createElement('button');
+        b.className = 'dlfmt';
+        b.textContent = label;
+        b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
+        menu.appendChild(b);
+    };
+    // the picker replaces this menu itself — no closeMenu() here (it would
+    // tear down the picker it just opened)
+    mk('+ Add to playlist…', () => openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY));
+    mk('Remove from library', async () => {
+        closeMenu();
+        await ipcRenderer.invoke('library:remove', it.tralbumId);
+    });
+    document.body.appendChild(menu);
+    menuEl = menu;
+    menu.style.left = Math.max(6, Math.min(e.clientX, window.innerWidth - 196)) + 'px';
+    menu.style.top = Math.max(6, Math.min(e.clientY, window.innerHeight - (menu.offsetHeight || 90) - 6)) + 'px';
 }
 
 // CRITICAL FIX: Only appends new items during load so the open tracklist isn't destroyed
@@ -560,6 +601,19 @@ function openRowMenu(e: MouseEvent, r: ListRow): void {
     if (!r.isAlbumRow) add('+ Add whole release to queue', async () => {
         await ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
     });
+    // NOT via add(): add() closes the menu after the callback, which would tear
+    // down the picker the callback just opened (the picker replaces this menu)
+    const plb = document.createElement('button');
+    plb.className = 'dlfmt';
+    plb.textContent = '+ Add to playlist…';
+    plb.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openPlaylistPicker({
+            tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId,
+            trackIndex: r.isAlbumRow ? undefined : r.trackIdx,
+        }, e.clientX, e.clientY);
+    });
+    menu.appendChild(plb);
     document.body.appendChild(menu);
     menuEl = menu;
     menu.style.left = Math.max(6, Math.min(e.clientX, window.innerWidth - 196)) + 'px';
@@ -629,13 +683,18 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
         `<div class="tlyear">${it.year || ''}</div>` +
         `<div class="tltags"></div>` +
         `<div class="tlbtns"><button class="tlplayall">▶ Play all</button>` +
-        `<button class="tlqueue">+ Queue</button><button class="tlclosebtn">Close</button></div></div>` +
+        `<button class="tlqueue">+ Queue</button><button class="tlpl">+ Playlist</button>` +
+        `<button class="tlclosebtn">Close</button></div></div>` +
         `<div class="tlright"><div class="tlstate">loading tracklist…</div></div>`;
-    
+
     endOfRow(card).after(panel);
     tlEl = panel;
-    
+
     panel.querySelector('.tlclosebtn')!.addEventListener('click', closeTracklist);
+    panel.querySelector('.tlpl')!.addEventListener('click', (e) => {
+        const r = (e.target as HTMLElement).getBoundingClientRect();
+        openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, r.left, r.bottom + 4);
+    });
     panel.querySelector('.tlplayall')!.addEventListener('click', () => { play(it, 0); });
     panel.querySelector('.tlqueue')!.addEventListener('click', async (e) => {
         const b = e.target as HTMLElement; b.textContent = 'adding…';
@@ -643,7 +702,7 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
         b.textContent = r && r.ok ? 'added ✓' : 'failed';
     });
 
-    const res: { ok: boolean; year?: number; tags?: string[]; tracks?: { id: string; title: string; artist: string; duration: number }[] } =
+    const res: { ok: boolean; cached?: boolean; year?: number; tags?: string[]; tracks?: { id: string; title: string; artist: string; duration: number }[] } =
         await ipcRenderer.invoke('collection:tracklist', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
     if (tlEl !== panel) return;
 
@@ -673,8 +732,15 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
     
     const right = panel.querySelector('.tlright') as HTMLElement;
     if (!res.ok || !res.tracks || !res.tracks.length) { right.innerHTML = `<div class="tlstate">couldn't load the tracklist</div>`; return; }
-    
+
     right.innerHTML = '';
+    if (res.cached) {
+        // network was unavailable: this list came from the saved index
+        const note = document.createElement('div');
+        note.className = 'tlstate';
+        note.textContent = 'offline — showing the saved tracklist';
+        right.appendChild(note);
+    }
     res.tracks.forEach((t, i) => {
         const row = document.createElement('div');
         row.className = 'tlrow';
@@ -683,20 +749,30 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
             `<span class="tltrk">${escapeHtml(t.title)}</span>` +
             `<span class="tldur">${fmtDur(t.duration)}</span>`;
         row.addEventListener('click', () => play(it, i, true));
-        // per-song add-to-queue (revealed on row hover); click plays as before
-        const q = document.createElement('button');
-        q.className = 'tlq';
-        q.title = 'add this song to queue';
-        q.textContent = '+';
-        q.addEventListener('click', async (e) => {
+        // right-click a song: add just that track to a playlist
+        row.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
             e.stopPropagation();
-            q.textContent = '…';
-            const r = await ipcRenderer.invoke('collection:enqueue',
-                { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id });
-            q.textContent = r && r.ok ? '✓' : '×';
-            setTimeout(() => { q.textContent = '+'; }, 900);
+            openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id }, e.clientX, e.clientY);
         });
-        row.appendChild(q);
+        // per-song add-to-queue (revealed on row hover); click plays as before.
+        // cached (offline) rows carry no track id, so the button is omitted —
+        // it would queue the whole release instead of the song
+        if (t.id) {
+            const q = document.createElement('button');
+            q.className = 'tlq';
+            q.title = 'add this song to queue';
+            q.textContent = '+';
+            q.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                q.textContent = '…';
+                const r = await ipcRenderer.invoke('collection:enqueue',
+                    { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id });
+                q.textContent = r && r.ok ? '✓' : '×';
+                setTimeout(() => { q.textContent = '+'; }, 900);
+            });
+            row.appendChild(q);
+        }
         right.appendChild(row);
     });
 }
@@ -760,7 +836,17 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
     positionMenu(menu, anchor); 
 }
 document.addEventListener('click', () => closeMenu());
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); closeTracklist(); } });
+// esc peels one layer at a time: menu -> playlist detail -> playlists panel -> tracklist
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (menuEl) { closeMenu(); return; }
+    if (plOpen) {
+        if (plDetailId) void renderPlaylistBrowser();
+        else setPlaylistsOpen(false);
+        return;
+    }
+    closeTracklist();
+});
 
 // media hotkeys while the collection is focused (space play/pause, ←/→ scrub,
 // shift+←/→ prev/next, shift+↑/↓ volume) forwarded to the player via main.
@@ -829,6 +915,39 @@ $('refresh').addEventListener('click', (e) => {
 });
 $('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
 
+// import audio files from the pc into the collection (local pseudo-releases);
+// main parses tags/duration/art and streams the new items back over collection:items
+const addLocalBtn = $('addlocal');
+addLocalBtn.addEventListener('click', async () => {
+    const prev = addLocalBtn.textContent;
+    addLocalBtn.textContent = 'importing…';
+    try {
+        const r = await ipcRenderer.invoke('library:add');
+        addLocalBtn.textContent = r && r.ok && !r.canceled ? `added ${r.added || 0} ✓` : prev;
+    } catch { addLocalBtn.textContent = '× failed'; }
+    setTimeout(() => { addLocalBtn.textContent = prev; }, 1400);
+});
+
+// drop items whose keys vanished (library removals, bandcamp-side hides)
+function removeItemKeys(keys: Set<string>): void {
+    if (!keys.size) return;
+    const before = items.length;
+    items = items.filter((i) => !keys.has(i.tralbumType + i.tralbumId));
+    if (items.length === before) return;
+    itemKeys.clear();
+    items.forEach((it, idx) => itemKeys.set(it.tralbumType + it.tralbumId, idx));
+    forceRender();
+}
+ipcRenderer.on('collection:remove-keys', (_e, keys: unknown) => {
+    removeItemKeys(new Set(Array.isArray(keys) ? keys.map(String) : []));
+});
+// full re-scan sends the complete list of keys to KEEP
+ipcRenderer.on('collection:prune', (_e, keep: unknown) => {
+    if (!Array.isArray(keep) || loading) return;
+    const keepSet = new Set(keep.map(String));
+    removeItemKeys(new Set(items.filter((i) => !keepSet.has(i.tralbumType + i.tralbumId)).map((i) => i.tralbumType + i.tralbumId)));
+});
+
 // incremental refreshes (wishlist hearts, purchases) stream in outside load()
 ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
     if (loading) return; // load() has its own listener with progress accounting
@@ -846,3 +965,365 @@ ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
 
 ipcRenderer.on('collection:load', () => load());
 ipcRenderer.on('collection:shown', () => { if (!items.length) load(); });
+
+// ---- playlists: build & play custom playlists out of your collection --------
+// the panel swaps in for the grid (which keeps rendering hidden underneath, so
+// streaming item batches / index updates never touch playlist DOM). entries are
+// added from anywhere in the collection: right-click a cover or song, the
+// "+ Playlist" button in the tracklist panel, or the list view's row menu.
+const plov = $('plov');
+const plBtn = $('plbtn');
+let plOpen = false;
+let plDetailId = ''; // '' = browser (all playlists)
+let plDragFrom: number | null = null;
+
+interface PlSummary { id: string; name: string; count: number; duration: number; arts: string[]; desc: string; cover: string }
+interface PlEntry { id: string; title: string; artist: string; album: string; art: string; duration: number }
+interface PlAddReq { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }
+
+function setPlaylistsOpen(open: boolean): void {
+    plOpen = open;
+    plov.style.display = open ? '' : 'none';
+    grid.style.display = open ? 'none' : '';
+    plBtn.classList.toggle('on', open);
+    if (open) void refreshPlaylists();
+}
+plBtn.addEventListener('click', () => setPlaylistsOpen(!plOpen));
+
+async function refreshPlaylists(): Promise<void> {
+    if (!plOpen) return;
+    if (plDetailId) await renderPlaylistDetail(plDetailId);
+    else await renderPlaylistBrowser();
+}
+
+const fmtLong = (secs: number): string => {
+    const s = Math.round(secs);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? `${h}h ${m}m` : `${m}m`;
+};
+
+// 2×2 art collage; a custom cover (or a single art) renders full-bleed instead
+function plCollage(arts: string[], cover = ''): HTMLElement {
+    const cov = document.createElement('div');
+    cov.className = 'pl-cover';
+    const use = cover ? [cover] : (arts || []).length >= 4 ? arts.slice(0, 4) : (arts || []).slice(0, 1);
+    if (!use.length) cov.innerHTML = '<div class="pl-empty">♫</div>';
+    else for (const a of use) {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.src = a;
+        cov.appendChild(img);
+    }
+    return cov;
+}
+
+async function renderPlaylistBrowser(): Promise<void> {
+    plDetailId = '';
+    const res = await ipcRenderer.invoke('playlists:all').catch(() => null);
+    if (!plOpen || plDetailId) return;
+    const lists: PlSummary[] = (res && res.playlists) || [];
+    plov.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'pl-grid';
+    const mkNew = document.createElement('button');
+    mkNew.className = 'pl-new';
+    mkNew.innerHTML = '<span class="big">+</span><span>New playlist</span>';
+    mkNew.addEventListener('click', async () => {
+        const name = await namePrompt('New playlist', '');
+        if (!name) return;
+        const c = await ipcRenderer.invoke('playlists:create', name);
+        if (c && c.ok) void renderPlaylistDetail(c.id);
+    });
+    wrap.appendChild(mkNew);
+    for (const pl of lists) {
+        const card = document.createElement('div');
+        card.className = 'pl-card';
+        card.appendChild(plCollage(pl.arts, pl.cover));
+        const name = document.createElement('div');
+        name.className = 'pl-name';
+        name.textContent = pl.name;
+        const sub = document.createElement('div');
+        sub.className = 'pl-sub';
+        sub.textContent = pl.count + (pl.count === 1 ? ' track' : ' tracks') + (pl.duration ? ' · ' + fmtLong(pl.duration) : '');
+        card.appendChild(name);
+        card.appendChild(sub);
+        card.addEventListener('click', () => void renderPlaylistDetail(pl.id));
+        wrap.appendChild(card);
+    }
+    plov.appendChild(wrap);
+    if (!lists.length) {
+        const st = document.createElement('div');
+        st.className = 'state';
+        st.textContent = 'No playlists yet. Create one, then right-click any cover or song in your collection to add it.';
+        plov.appendChild(st);
+    }
+}
+
+async function renderPlaylistDetail(id: string): Promise<void> {
+    plDetailId = id;
+    const res = await ipcRenderer.invoke('playlists:get', id).catch(() => null);
+    if (!plOpen || plDetailId !== id) return;
+    if (!res || !res.ok) { void renderPlaylistBrowser(); return; }
+    const p: { id: string; name: string; entries: PlEntry[]; desc?: string; coverUrl?: string } = res.playlist;
+    plov.innerHTML = '';
+
+    const head = document.createElement('div');
+    head.className = 'pl-head';
+    const back = document.createElement('button');
+    back.className = 'tbtn';
+    back.textContent = '←';
+    back.title = 'All playlists';
+    back.addEventListener('click', () => void renderPlaylistBrowser());
+    head.appendChild(back);
+    // cover: custom image when set, else the entry-art collage. click to change.
+    const cov = plCollage([...new Set(p.entries.map((e) => e.art).filter(Boolean))], p.coverUrl || '');
+    cov.classList.add('sm', 'clickable');
+    cov.title = 'Change cover';
+    cov.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeMenu();
+        const menu = document.createElement('div');
+        menu.className = 'dlmenu';
+        menu.addEventListener('click', (ev) => ev.stopPropagation());
+        const mk = (label: string, fn: () => void) => {
+            const b = document.createElement('button');
+            b.className = 'dlfmt';
+            b.textContent = label;
+            b.addEventListener('click', async (ev) => { ev.stopPropagation(); fn(); });
+            menu.appendChild(b);
+        };
+        mk('Choose cover image…', async () => {
+            closeMenu();
+            const r = await ipcRenderer.invoke('playlists:cover-pick', id);
+            if (r && r.ok) void renderPlaylistDetail(id);
+        });
+        if (p.coverUrl) mk('Remove custom cover', async () => {
+            closeMenu();
+            await ipcRenderer.invoke('playlists:cover-clear', id);
+            void renderPlaylistDetail(id);
+        });
+        document.body.appendChild(menu);
+        menuEl = menu;
+        const r = cov.getBoundingClientRect();
+        menu.style.left = Math.max(6, Math.min(r.left, window.innerWidth - 196)) + 'px';
+        menu.style.top = Math.min(r.bottom + 4, window.innerHeight - 90) + 'px';
+    });
+    head.appendChild(cov);
+    const twrap = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'pl-title';
+    title.textContent = p.name;
+    title.title = 'Rename';
+    title.addEventListener('click', async () => {
+        const n = await namePrompt('Rename playlist', p.name);
+        if (!n || n === p.name) return;
+        await ipcRenderer.invoke('playlists:rename', { id, name: n });
+        void renderPlaylistDetail(id);
+    });
+    const meta = document.createElement('div');
+    meta.className = 'pl-meta';
+    const dur = p.entries.reduce((s, e) => s + (e.duration || 0), 0);
+    meta.textContent = p.entries.length + (p.entries.length === 1 ? ' track' : ' tracks') + (dur ? ' · ' + fmtLong(dur) : '');
+    twrap.appendChild(title);
+    twrap.appendChild(meta);
+    // description under the title; click to edit (multiline)
+    const desc = document.createElement('div');
+    desc.className = 'pl-desc' + (p.desc ? '' : ' empty');
+    desc.textContent = p.desc || 'Add a description…';
+    desc.title = 'Edit description';
+    desc.addEventListener('click', async () => {
+        const d = await textPrompt('Playlist description', p.desc || '', true);
+        if (d === null) return; // cancelled ('' clears)
+        await ipcRenderer.invoke('playlists:set-desc', { id, desc: d });
+        void renderPlaylistDetail(id);
+    });
+    twrap.appendChild(desc);
+    head.appendChild(twrap);
+
+    const actions = document.createElement('div');
+    actions.className = 'pl-actions';
+    const act = (label: string, cls: string, fn: (b: HTMLButtonElement) => void): HTMLButtonElement => {
+        const b = document.createElement('button');
+        b.className = ('tbtn ' + cls).trim();
+        b.textContent = label;
+        b.addEventListener('click', () => fn(b));
+        actions.appendChild(b);
+        return b;
+    };
+    act('▶ Play', 'primary', () => void ipcRenderer.invoke('playlists:play', { id }));
+    act('+ Queue', '', async (b) => {
+        const r = await ipcRenderer.invoke('playlists:enqueue', id);
+        b.textContent = r && r.ok ? 'added ✓' : 'failed';
+        setTimeout(() => { b.textContent = '+ Queue'; }, 900);
+    });
+    // downloads the tracks in order + playlist-cover.png + description.txt +
+    // the order file (m3u/pls/… per the download settings)
+    act('⤓ Download', '', async (b) => {
+        const r = await ipcRenderer.invoke('playlists:download', id);
+        b.textContent = r && r.ok ? 'started ✓' : '× ' + ((r && r.error) || 'failed');
+        setTimeout(() => { b.textContent = '⤓ Download'; }, 1600);
+    });
+    // delete arms on the first click instead of a confirm dialog
+    let armed = false;
+    act('Delete', '', async (b) => {
+        if (!armed) {
+            armed = true;
+            b.textContent = 'Really delete?';
+            setTimeout(() => { armed = false; b.textContent = 'Delete'; }, 2500);
+            return;
+        }
+        await ipcRenderer.invoke('playlists:delete', id);
+        void renderPlaylistBrowser();
+    });
+    head.appendChild(actions);
+    plov.appendChild(head);
+
+    if (!p.entries.length) {
+        const st = document.createElement('div');
+        st.className = 'state';
+        st.textContent = 'This playlist is empty — right-click covers or songs in your collection to add them.';
+        plov.appendChild(st);
+        return;
+    }
+
+    p.entries.forEach((en, i) => {
+        const row = document.createElement('div');
+        row.className = 'pl-row';
+        row.draggable = true;
+        row.title = 'Play the playlist from here (drag to reorder)';
+        row.innerHTML =
+            `<span class="pl-num">${i + 1}.</span>` +
+            `<span>${escapeHtml(en.title)}</span>` +
+            `<span class="pl-art2">${escapeHtml(en.artist)}</span>` +
+            `<span class="pl-alb2">${escapeHtml(en.album)}</span>` +
+            `<span class="pl-dur">${fmtDur(en.duration)}</span>`;
+        const x = document.createElement('button');
+        x.className = 'pl-x';
+        x.title = 'Remove from playlist';
+        x.textContent = '✕';
+        x.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await ipcRenderer.invoke('playlists:remove', { id, index: i });
+            void renderPlaylistDetail(id);
+        });
+        row.appendChild(x);
+        row.addEventListener('click', () => void ipcRenderer.invoke('playlists:play', { id, startIndex: i }));
+        row.addEventListener('dragstart', (e) => {
+            plDragFrom = i;
+            row.classList.add('dragging');
+            if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+        });
+        row.addEventListener('dragend', () => {
+            row.classList.remove('dragging');
+            for (const el of Array.from(plov.querySelectorAll('.dragover'))) el.classList.remove('dragover');
+        });
+        row.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (plDragFrom !== null && plDragFrom !== i) row.classList.add('dragover');
+        });
+        row.addEventListener('dragleave', () => row.classList.remove('dragover'));
+        row.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            row.classList.remove('dragover');
+            if (plDragFrom === null || plDragFrom === i) return;
+            const from = plDragFrom;
+            plDragFrom = null;
+            await ipcRenderer.invoke('playlists:move', { id, from, to: i });
+            void renderPlaylistDetail(id);
+        });
+        plov.appendChild(row);
+    });
+}
+
+// pick a playlist to add a release/track to. opened by right-click on covers,
+// tracklist rows & list-view rows, and the tracklist panel's "+ Playlist".
+async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<void> {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'dlmenu';
+    menu.addEventListener('click', (ev) => ev.stopPropagation());
+    const title = document.createElement('div');
+    title.className = 'plm-title';
+    title.textContent = req.trackId !== undefined || req.trackIndex !== undefined ? 'Add song to playlist' : 'Add release to playlist';
+    menu.appendChild(title);
+    document.body.appendChild(menu);
+    menuEl = menu;
+    const place = () => {
+        menu.style.left = Math.max(6, Math.min(x, window.innerWidth - 196)) + 'px';
+        menu.style.top = Math.max(6, Math.min(y, window.innerHeight - (menu.offsetHeight || 120) - 6)) + 'px';
+    };
+    place();
+    const addRow = (label: string, fn: (b: HTMLButtonElement) => void): void => {
+        const b = document.createElement('button');
+        b.className = 'dlfmt';
+        b.textContent = label;
+        b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(b); });
+        menu.appendChild(b);
+    };
+    const res = await ipcRenderer.invoke('playlists:all').catch(() => null);
+    if (menuEl !== menu) return; // superseded by another menu
+    const lists: PlSummary[] = (res && res.playlists) || [];
+    for (const pl of lists) {
+        addRow(pl.name, async (b) => {
+            b.textContent = 'adding…';
+            const r = await ipcRenderer.invoke('playlists:add', { id: pl.id, ...req });
+            b.textContent = !r || !r.ok ? '× ' + (r?.error || 'failed')
+                : r.added ? '✓ added' + (r.added > 1 ? ' ' + r.added + ' tracks' : '')
+                : 'already on it';
+            setTimeout(closeMenu, 900);
+            if (plOpen) void refreshPlaylists();
+        });
+    }
+    addRow('+ New playlist…', async () => {
+        closeMenu();
+        const name = await namePrompt('New playlist', '');
+        if (!name) return;
+        const c = await ipcRenderer.invoke('playlists:create', name);
+        if (c && c.ok) {
+            await ipcRenderer.invoke('playlists:add', { id: c.id, ...req });
+            if (plOpen) void refreshPlaylists();
+        }
+    });
+    place();
+}
+
+// window.prompt doesn't exist in electron renderers: tiny one-field modal.
+// resolves the trimmed text ('' allowed — that's how a description is cleared)
+// or null when cancelled. multiline uses a textarea (Ctrl+Enter submits).
+function textPrompt(title: string, initial: string, multiline = false): Promise<string | null> {
+    return new Promise((resolve) => {
+        const back = document.createElement('div');
+        back.className = 'modalback';
+        back.innerHTML =
+            `<div class="modal"><h3></h3>` +
+            (multiline
+                ? `<textarea spellcheck="false" maxlength="2000"></textarea>` +
+                  `<div class="mrow" style="margin-top:10px"><span style="flex:1;font-size:11px;color:#848079;align-self:center">Ctrl+Enter to save</span>`
+                : `<input type="text" spellcheck="false" autocomplete="off" maxlength="100" style="width:100%">` +
+                  `<div class="mrow" style="margin-top:14px">`) +
+            `<button class="m-ok primary">OK</button>` +
+            `<button class="m-cancel">Cancel</button></div></div>`;
+        (back.querySelector('h3') as HTMLElement).textContent = title;
+        // (textarea shares every member used here; one type keeps listeners simple)
+        const input = back.querySelector(multiline ? 'textarea' : 'input') as HTMLInputElement;
+        input.value = initial;
+        let settled = false;
+        const done = (v: string | null) => { if (settled) return; settled = true; back.remove(); resolve(v); };
+        back.querySelector('.m-ok')!.addEventListener('click', () => done(input.value.trim()));
+        back.querySelector('.m-cancel')!.addEventListener('click', () => done(null));
+        back.addEventListener('click', (e) => { e.stopPropagation(); if (e.target === back) done(null); });
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation(); // keep esc/media hotkeys from firing behind the modal
+            if (e.key === 'Enter' && (!multiline || e.ctrlKey || e.metaKey)) done(input.value.trim());
+            if (e.key === 'Escape') done(null);
+        });
+        document.body.appendChild(back);
+        input.focus();
+        input.select();
+    });
+}
+// name prompts treat an empty submit as a cancel
+async function namePrompt(title: string, initial: string): Promise<string | null> {
+    const v = await textPrompt(title, initial, false);
+    return v ? v : null;
+}

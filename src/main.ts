@@ -1,6 +1,7 @@
 import { app, BrowserWindow, BrowserView, ipcMain, Menu, Tray, nativeImage, shell, dialog, clipboard } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { pathToFileURL } from 'url';
 import { platform } from 'os';
 import Store from 'electron-store';
@@ -11,6 +12,7 @@ import { LastfmService } from './services/lastfmService';
 import { BandcampApi } from './services/bandcampApi';
 import { buildExtractorScript } from './services/queueExtractor';
 import { buildId3v23 } from './services/id3';
+import { readLocalTags, AUDIO_EXTENSIONS } from './services/localTags';
 import type { NowPlaying, ResolveStreamRequest, ResolveStreamResponse, TralbumType, PlayerTrack } from './shared/types';
 
 const darkReaderPath = require.resolve('darkreader/darkreader.js');
@@ -131,14 +133,38 @@ class DiskCache<T> {
     sizeBytes(): number { try { return fs.statSync(this.file).size; } catch { return 0; } }
 }
 type IndexCacheEntryT = { g: string[]; t: [string, number][]; y: number; a?: string };
+// custom playlists built from the collection view. entries are fully
+// materialized tracks (display metadata + resolver handle); stream urls are
+// NOT stored — they expire, so playback resolves them lazily like any queued
+// collection track (player:resolve-stream).
+type PlaylistEntryT = {
+    id: string; title: string; artist: string; album: string; art: string;
+    duration: number; url: string; bandId: string; tralbumId: string; tralbumType: TralbumType;
+};
+type PlaylistT = { id: string; name: string; createdAt: number; entries: PlaylistEntryT[]; desc?: string; cover?: string };
+// local files library (quodlibet-style: files are parsed once into a queryable
+// index keyed by path — the on-disk folder layout is irrelevant afterwards)
+type LocalTrackT = {
+    id: string; file: string; title: string; artist: string; album: string; albumArtist: string;
+    year: number; trackNum: number; genre: string[]; duration: number;
+    /** extracted embedded cover, cached under userData/local-art; '' when none */
+    art: string;
+    addedAt: number;
+    /** file mtime at import; lets the folder scan skip unchanged files */
+    mtime?: number;
+};
 let releaseIndexDisk: DiskCache<Record<string, IndexCacheEntryT>>;
 let collectionItemsDisk: DiskCache<any[]>;
 let yearsDisk: DiskCache<Record<string, number>>;
+let playlistsDisk: DiskCache<PlaylistT[]>;
+let localFilesDisk: DiskCache<LocalTrackT[]>;
 function initDiskCaches(): void {
     const ud = app.getPath('userData');
     releaseIndexDisk = new DiskCache(path.join(ud, 'release-index.json'), {});
     collectionItemsDisk = new DiskCache(path.join(ud, 'collection-items.json'), []);
     yearsDisk = new DiskCache(path.join(ud, 'year-cache.json'), {});
+    playlistsDisk = new DiskCache(path.join(ud, 'playlists.json'), []);
+    localFilesDisk = new DiskCache(path.join(ud, 'local-files.json'), []);
     // one-time migration out of config.json (also shrinks it back to settings-only)
     try {
         const oldIdx = store.get('releaseIndexCache') as any;
@@ -152,6 +178,60 @@ function initDiskCaches(): void {
         }
     } catch { /* start with fresh caches */ }
 }
+
+// --- local files library helpers ---------------------------------------------
+// local pseudo-releases live beside bandcamp items in the collection view; their
+// ids are namespaced 'local:…' and every resolver branches on that prefix BEFORE
+// any bandcamp id math (toIdStr would mangle them).
+const LOCAL_PREFIX = 'local:';
+const isLocalId = (id: unknown): boolean => String(id || '').startsWith(LOCAL_PREFIX);
+const localFileUrl = (p: string): string => { try { return p ? pathToFileURL(p).href : ''; } catch { return ''; } };
+function localAlbumKey(t: { albumArtist: string; artist: string; album: string; id: string }): string {
+    if (!t.album) return LOCAL_PREFIX + t.id; // untagged file: its own card
+    const h = crypto.createHash('md5').update(((t.albumArtist || t.artist) + '\0' + t.album).toLowerCase()).digest('hex').slice(0, 16);
+    return LOCAL_PREFIX + h;
+}
+function localGroups(): Map<string, LocalTrackT[]> {
+    const groups = new Map<string, LocalTrackT[]>();
+    for (const t of localFilesDisk.get()) {
+        const k = localAlbumKey(t);
+        const g = groups.get(k);
+        if (g) g.push(t); else groups.set(k, [t]);
+    }
+    for (const g of groups.values()) g.sort((a, b) => (a.trackNum - b.trackNum) || a.title.localeCompare(b.title));
+    return groups;
+}
+function localCollectionItems(): any[] {
+    const items: any[] = [];
+    for (const [key, tracks] of localGroups()) {
+        const first = tracks[0];
+        const withArt = tracks.find((t) => t.art);
+        items.push({
+            itemId: key, tralbumId: key, tralbumType: 'a',
+            title: first.album || first.title,
+            artist: first.albumArtist || first.artist || '(unknown artist)',
+            art: withArt ? localFileUrl(withArt.art) : '',
+            url: '', bandId: '',
+            addedAt: Math.max(...tracks.map((t) => t.addedAt || 0)),
+            year: tracks.map((t) => t.year).find((y) => y) || 0,
+            downloadUrl: '', local: true,
+        });
+    }
+    return items;
+}
+function localPlayerTracks(albumKey: string): PlayerTrack[] {
+    const tracks = localGroups().get(albumKey) || [];
+    return tracks.map((t) => ({
+        id: t.id, title: t.title, artist: t.artist || t.albumArtist, album: t.album,
+        art: localFileUrl(t.art), src: localFileUrl(t.file),
+        duration: t.duration || 0, url: '', bandId: '', tralbumId: albumKey, tralbumType: 'a' as TralbumType,
+    }));
+}
+function localTrackById(id: unknown): LocalTrackT | undefined {
+    const want = String(id || '');
+    return want ? localFilesDisk.get().find((t) => t.id === want) : undefined;
+}
+
 let mainWindow: BrowserWindow;
 let headerView: BrowserView;
 // contentView is an alias for the *active* tab's view; every place that navigates
@@ -162,8 +242,7 @@ let collectionView: BrowserView;
 let collectionVisible = false;
 let feedView: BrowserView;
 let feedVisible = false;
-let searchView: BrowserView;
-let searchVisible = false;
+let spotlightWin: BrowserWindow | null = null; // macOS-spotlight-style search popup
 
 interface Tab { id: number; view: BrowserView; title: string; }
 let tabs: Tab[] = [];
@@ -232,7 +311,6 @@ function adjustContentViews() {
     // collection / feed views (added only while open) fill the content area
     if (collectionView && collectionVisible) collectionView.setBounds(contentRect);
     if (feedView && feedVisible) feedView.setBounds(contentRect);
-    if (searchView && searchVisible) searchView.setBounds(contentRect);
 }
 
 function setupTray() {
@@ -288,12 +366,10 @@ function closeFeed() {
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('feed:state', false);
 }
 
-// hide the global search overlay. results are session junk — tell the view to
-// wipe them so nothing from a search lingers around.
+// close the spotlight search popup (results are wiped on close by the popup itself)
 function closeSearch() {
-    if (searchVisible && searchView) mainWindow.removeBrowserView(searchView);
-    searchVisible = false;
-    if (searchView && !searchView.webContents.isDestroyed()) searchView.webContents.send('gsearch:hidden');
+    if (spotlightWin && !spotlightWin.isDestroyed()) spotlightWin.close();
+    spotlightWin = null;
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', false);
 }
 
@@ -355,6 +431,36 @@ function themeForUrl(url: string): 'dark' | 'light' {
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
 // which window-bar controls are visible (min/max/close/settings are not optional).
 // home defaults hidden (long-standing preference); everything else shown.
+// customizable app shortcuts (settings -> Keybinds). matched in main via
+// before-input-event on every view, so they work wherever focus sits.
+const SHORTCUT_DEFAULTS: Record<string, string> = {
+    collection: 'Ctrl+Shift+C',
+    feed: 'Ctrl+Shift+F',
+    home: 'Ctrl+Shift+H',
+    downloads: 'Ctrl+Shift+D',
+    search: 'Ctrl+K',
+};
+function getShortcuts(): Record<string, string> {
+    const saved = store.get('shortcuts', {}) as Record<string, string>;
+    const out: Record<string, string> = {};
+    for (const k of Object.keys(SHORTCUT_DEFAULTS)) {
+        out[k] = typeof saved[k] === 'string' ? saved[k] : SHORTCUT_DEFAULTS[k];
+    }
+    return out;
+}
+// "Ctrl+Shift+C"-style accel from an electron before-input-event payload
+function accelOfInput(input: Electron.Input): string {
+    const key = String(input.key || '');
+    if (!key || ['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return '';
+    const parts: string[] = [];
+    if (input.control) parts.push('Ctrl');
+    if (input.alt) parts.push('Alt');
+    if (input.meta) parts.push('Cmd');
+    if (input.shift) parts.push('Shift');
+    parts.push(key.length === 1 ? key.toUpperCase() : key);
+    return parts.join('+');
+}
+
 const HEADER_BUTTON_DEFAULTS = { home: false, back: true, forward: true, newtab: false, urlbar: true, reload: true, downloads: true, gsearch: false, collection: true, feed: true } as const;
 function getHeaderButtons(): Record<string, boolean> {
     const saved = store.get('headerButtons', {}) as Record<string, boolean>;
@@ -519,10 +625,6 @@ async function init() {
     });
     feedView.setBackgroundColor('#181a1b');
 
-    searchView = new BrowserView({
-        webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode }
-    });
-    searchView.setBackgroundColor('#181a1b');
     if (devMode) {
         feedView.webContents.on('did-fail-load', (_e, code, desc, url) =>
             console.log('[bcrpc] feed view FAILED ' + code + ' ' + desc + ' ' + url));
@@ -537,7 +639,8 @@ async function init() {
 
     collectionView.webContents.loadFile(path.join(__dirname, 'collection', 'collection.html'));
     feedView.webContents.loadFile(path.join(__dirname, 'feed', 'feed.html'));
-    searchView.webContents.loadFile(path.join(__dirname, 'search', 'search.html'));
+    // shortcuts work no matter which pane has focus
+    for (const v of [headerView, playerView, collectionView, feedView]) wireShortcutsOn(v.webContents);
 
     // opt-in (settings, off by default): pre-fetch the collection in the background
     // right after startup so opening the view is instant. small delay so the fetch
@@ -594,6 +697,24 @@ async function init() {
     let userGestureAt = 0;
     let gestureSeen = false;
     let fallbackCooldownUntil = 0;
+    // app-wide customizable shortcuts (collection / feed / home / downloads / search)
+    function handleShortcut(input: Electron.Input): boolean {
+        if (input.type !== 'keyDown') return false;
+        if (!input.control && !input.alt && !input.meta) return false; // never hijack typing
+        const accel = accelOfInput(input);
+        if (!accel) return false;
+        const sc = getShortcuts();
+        if (accel === sc.collection) { ipcMain.emit('collection:toggle'); return true; }
+        if (accel === sc.feed) { ipcMain.emit('feed:toggle'); return true; }
+        if (accel === sc.home) { ipcMain.emit('app:home'); return true; }
+        if (accel === sc.downloads) { ipcMain.emit('downloads:toggle'); return true; }
+        if (accel === sc.search) { ipcMain.emit('gsearch:toggle'); return true; }
+        return false;
+    }
+    function wireShortcutsOn(wc: Electron.WebContents): void {
+        wc.on('before-input-event', (event, input) => { if (handleShortcut(input)) event.preventDefault(); });
+    }
+
     let trapSeq = 0;
     // assigned once the collection fetcher exists; fired (debounced) whenever the
     // fan collects/uncollects something on a bandcamp page
@@ -873,23 +994,39 @@ async function init() {
 
     // global bandcamp search view
     ipcMain.on('gsearch:log', (_e, msg: unknown) => { if (devMode) console.log('[bcrpc:gsearch] ' + String(msg)); });
-    ipcMain.on('gsearch:toggle', () => {
-        searchVisible = !searchVisible;
-        if (searchVisible) {
-            closeCollection(); closeFeed(); // one overlay at a time
-            mainWindow.addBrowserView(searchView);
-            mainWindow.setTopBrowserView(headerView);
-            mainWindow.setTopBrowserView(playerView);
-            adjustContentViews();
-            searchView.webContents.send('gsearch:shown');
-        } else {
-            mainWindow.removeBrowserView(searchView);
-            searchView.webContents.send('gsearch:hidden'); // wipe results & query
-        }
-        if (headerView && !headerView.webContents.isDestroyed()) {
-            headerView.webContents.send('gsearch:state', searchVisible);
-        }
-    });
+    const openSpotlight = () => {
+        if (spotlightWin && !spotlightWin.isDestroyed()) { closeSearch(); return; }
+        try {
+            const b = mainWindow.getContentBounds();
+            spotlightWin = new BrowserWindow({
+                width: 620, height: 460, frame: false, resizable: false, parent: mainWindow,
+                x: Math.max(0, b.x + Math.round((b.width - 620) / 2)), y: b.y + 110,
+                backgroundColor: '#181a1b',
+                webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode },
+            });
+            spotlightWin.loadFile(path.join(__dirname, 'search', 'search.html'));
+            spotlightWin.webContents.on('did-finish-load', () => {
+                if (spotlightWin && !spotlightWin.isDestroyed()) spotlightWin.webContents.send('gsearch:shown');
+            });
+            // esc dismisses — handled in MAIN so it works no matter what the
+            // page is doing (the renderer listener alone proved unreliable).
+            // the search shortcut itself also toggles the popup closed.
+            spotlightWin.webContents.on('before-input-event', (event, input) => {
+                if (input.type !== 'keyDown') return;
+                if (input.key === 'Escape') { event.preventDefault(); closeSearch(); return; }
+                const accel = accelOfInput(input);
+                if (accel && accel === getShortcuts().search) { event.preventDefault(); closeSearch(); }
+            });
+            // spotlight behavior: clicking elsewhere dismisses it
+            spotlightWin.on('blur', () => closeSearch());
+            spotlightWin.on('closed', () => {
+                spotlightWin = null;
+                if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', false);
+            });
+            if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', true);
+        } catch { spotlightWin = null; }
+    };
+    ipcMain.on('gsearch:toggle', openSpotlight);
     ipcMain.on('gsearch:close', () => closeSearch());
     ipcMain.handle('gsearch:query', async (_e, req: { text?: string; filter?: string }) => {
         const f = (req?.filter === 't' || req?.filter === 'a' || req?.filter === 'b') ? req.filter : '';
@@ -921,6 +1058,10 @@ async function init() {
         if (collFetchActive) return { ok: true, count: 0 };
         collFetchActive = true;
         try {
+            // local files first: they live on disk, so they show even offline /
+            // logged out (total 0 = don't touch the loader's progress accounting)
+            const locals = localCollectionItems();
+            if (locals.length) sendCollItems(locals, locals.length, 0);
             const cached = (!fullRescan && cacheReleasesOn()) ? collectionItemsDisk.get() : [];
             if (Array.isArray(cached) && cached.length) {
                 sendCollItems(cached, cached.length, cached.length);
@@ -964,9 +1105,11 @@ async function init() {
                 if (items.length) {
                     if (cacheReleasesOn()) collectionItemsDisk.replace(items);
                     // a re-scan is the source of truth: drop anything the view still
-                    // shows that bandcamp no longer lists (hidden / un-wishlisted)
+                    // shows that bandcamp no longer lists (hidden / un-wishlisted).
+                    // local pseudo-items aren't bandcamp's to prune — keep their keys
                     if (collectionView && !collectionView.webContents.isDestroyed()) {
-                        collectionView.webContents.send('collection:prune', items.map((c) => c.tralbumType + c.tralbumId));
+                        collectionView.webContents.send('collection:prune',
+                            [...items.map((c) => c.tralbumType + c.tralbumId), ...localCollectionItems().map((c) => c.tralbumType + c.tralbumId)]);
                     }
                     return { ok: true, count: items.length };
                 }
@@ -998,6 +1141,7 @@ async function init() {
     // of an album carries no artist/art of its own, so resolve it through its parent
     // album (which has them) rather than the bare track endpoint.
     const resolveRelease = async (req: { tralbumId: string; tralbumType: TralbumType; bandId: string }): Promise<{ tracks: PlayerTrack[]; activeIndex: number }> => {
+        if (isLocalId(req.tralbumId)) return { tracks: localPlayerTracks(String(req.tralbumId)), activeIndex: 0 };
         if (req.tralbumType === 't') {
             const r = await bandcampApi.resolveQueueForTrack(req.tralbumId, req.bandId);
             if (r.tracks.length) return r;
@@ -1015,7 +1159,8 @@ async function init() {
                 // start at the chosen track (by id, else index) so the whole album
                 // becomes the queue with the rest of it queued behind
                 let active = typeof req.activeIndex === 'number' ? req.activeIndex : resolved.activeIndex;
-                if (req.trackId) { const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId)); if (i !== -1) active = i; }
+                // raw compare too: local track ids ('L…') aren't numeric
+                if (req.trackId) { const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId) || t.id === String(req.trackId)); if (i !== -1) active = i; }
                 active = Math.max(0, Math.min(active, tracks.length - 1));
                 // a single-track purchase plays JUST that track — resolving through
                 // the parent album is only for metadata, not to queue the whole thing
@@ -1038,24 +1183,76 @@ async function init() {
     // fetch a release's tracklist (+ resolved release year) for the collection view
     ipcMain.handle('collection:tracklist', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string }) => {
         try {
-            const tracks = (await resolveRelease(req)).tracks;
+            if (isLocalId(req.tralbumId)) {
+                // local pseudo-album: everything comes from the library, no network
+                const group = localGroups().get(String(req.tralbumId)) || [];
+                if (!group.length) return { ok: false, error: 'no tracks' };
+                const first = group[0];
+                return {
+                    ok: true,
+                    year: group.map((t) => t.year).find((y) => y) || 0,
+                    tags: [...new Set(group.flatMap((t) => t.genre || []))],
+                    title: first.album || first.title,
+                    artist: first.albumArtist || first.artist,
+                    art: localFileUrl((group.find((t) => t.art) || first).art),
+                    tracks: group.map((t) => ({ id: t.id, title: t.title, artist: t.artist || t.albumArtist, duration: t.duration || 0 })),
+                };
+            }
+            const k = (req.tralbumType === 't' ? 't' : 'a') + toIdStr(req.tralbumId);
+            const idxCache = releaseIndexDisk.get();
+            // the live fetch is opportunistic, NOT a requirement: when it fails
+            // (offline, api down) the saved index serves the tracklist instead.
+            let tracks: PlayerTrack[] = [];
+            try { tracks = (await resolveRelease(req)).tracks; } catch { tracks = []; }
             if (devMode) console.log('[bcrpc] collection:tracklist ' + req.tralbumType + req.tralbumId + ' band=' + req.bandId + ' -> ' + tracks.length + ' tracks');
-            if (!tracks.length) return { ok: false, error: 'no tracks' };
-            const year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req);
+            if (!tracks.length) {
+                const cachedEntry = idxCache[k] || sessionDetails.get(k);
+                if (cachedEntry && (cachedEntry.t || []).length) {
+                    const y = cachedEntry.y || yearsDisk.get()[req.tralbumType + ':' + req.tralbumId] || 0;
+                    return {
+                        ok: true, cached: true, year: y, tags: cachedEntry.g || [],
+                        title: '', artist: '', art: '',
+                        tracks: (cachedEntry.t || []).map(([title, duration]) => ({ id: '', title, artist: '', duration: duration || 0 })),
+                    };
+                }
+                return { ok: false, error: 'no tracks' };
+            }
+            let year = 0;
+            try { year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req); } catch { year = 0; }
             if (year) persistYear(req.tralbumType, req.tralbumId, year);
             // genre tags for the panel: from the release index when it has them
             // (a collection item's fetch here also fills the persistent cache)
-            const k = (req.tralbumType === 't' ? 't' : 'a') + toIdStr(req.tralbumId);
-            const idxCache = releaseIndexDisk.get();
             let tags: string[] = idxCache[k]?.g || sessionDetails.get(k)?.g || [];
             if (!tags.length && !idxCache[k] && !sessionDetails.get(k)) {
-                const d = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: req.tralbumType === 't' ? 't' : 'a', bandId: req.bandId }, true);
-                if (d.ok) {
+                // tags are decoration — their fetch failing must not sink the panel
+                let d: Awaited<ReturnType<typeof bandcampApi.fetchSearchIndex>> | null = null;
+                try { d = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: req.tralbumType === 't' ? 't' : 'a', bandId: req.bandId }, true); } catch { d = null; }
+                if (d && d.ok) {
                     tags = d.tags;
                     const entry: IndexCacheEntry = { g: d.tags, t: d.tracks.map((t) => [t.title, t.duration] as [string, number]), y: d.year };
                     if (d.about) entry.a = d.about;
                     if (collectionKeys.has(k)) { idxCache[k] = entry; releaseIndexDisk.save(); }
                     else sessionDetails.set(k, entry);
+                }
+            } else if (req.tralbumType !== 't') {
+                // opening an album re-confirms the saved index against the freshly
+                // resolved tracklist: renamed/added/removed songs heal the stored
+                // entry (and the view's search index) instead of lingering stale.
+                // 't' requests resolve through the PARENT album, so their per-track
+                // index entries are left alone.
+                const entry = idxCache[k] || sessionDetails.get(k);
+                if (entry) {
+                    const fresh = tracks.map((t) => [t.title, t.duration] as [string, number]);
+                    const drifted = JSON.stringify(entry.t || []) !== JSON.stringify(fresh) || (year > 0 && entry.y !== year);
+                    if (drifted) {
+                        entry.t = fresh;
+                        if (year > 0) entry.y = year;
+                        if (idxCache[k]) releaseIndexDisk.save();
+                        if (collectionView && !collectionView.webContents.isDestroyed()) {
+                            collectionView.webContents.send('collection:index', [indexRowOf(k, entry)]);
+                        }
+                        if (devMode) console.log('[bcrpc] index re-confirmed (drift healed) ' + k);
+                    }
                 }
             }
             const first = tracks[0];
@@ -1074,6 +1271,8 @@ async function init() {
     // them). cached to disk so it's a one-time cost. streams results back as they land.
     ipcMain.on('collection:enrich-years', async (_e, reqs: { tralbumId: string; tralbumType: TralbumType; bandId: string }[]) => {
         if (!Array.isArray(reqs) || !reqs.length) return;
+        reqs = reqs.filter((r) => !isLocalId(r.tralbumId)); // local years come from tags, never the network
+        if (!reqs.length) return;
         const store2 = yearsDisk.get();
         const send = (updates: { tralbumId: string; year: number }[]) => {
             if (updates.length && collectionView && !collectionView.webContents.isDestroyed()) {
@@ -1161,6 +1360,34 @@ async function init() {
     ipcMain.on('collection:enrich-index', async (_e, reqs: { tralbumId: string; tralbumType: TralbumType; bandId: string; art?: string }[]) => {
         if (!Array.isArray(reqs) || !reqs.length || indexRunActive) return;
         indexRunActive = true;
+        const send = (rows: IndexRow[]) => { if (rows.length && idxAlive()) collectionView.webContents.send('collection:index', rows); };
+        // local pseudo-albums index instantly from the library (no crawling, and
+        // they must never reach the bandcamp id paths below) — search & list view
+        // get their tracks/genres the same way as crawled releases
+        const localReqs = reqs.filter((r) => isLocalId(r.tralbumId));
+        reqs = reqs.filter((r) => !isLocalId(r.tralbumId));
+        if (localReqs.length) {
+            const groups = localGroups();
+            const rows: IndexRow[] = [];
+            for (const r of localReqs) {
+                const g = groups.get(String(r.tralbumId));
+                if (!g || !g.length) continue;
+                const first = g[0];
+                const tags = [...new Set(g.flatMap((t) => t.genre || []))];
+                rows.push({
+                    key: r.tralbumType + String(r.tralbumId),
+                    blob: [first.albumArtist, first.album, ...g.map((t) => t.artist + ' ' + t.title), tags.join(' ')].join(' ').toLowerCase(),
+                    tags,
+                    tracks: g.map((t) => [t.title, t.duration || 0] as [string, number]),
+                });
+            }
+            send(rows);
+        }
+        if (!reqs.length) {
+            if (idxAlive()) collectionView.webContents.send('collection:index-done');
+            indexRunActive = false;
+            return;
+        }
         const cache = releaseIndexDisk.get();
         // the request list IS the collection: remember it & evict anything else
         // that leaked into the persistent cache (e.g. feed items opened earlier)
@@ -1168,7 +1395,6 @@ async function init() {
         for (const r of reqs) collectionKeys.add(r.tralbumType + toIdStr(r.tralbumId));
         for (const k of Object.keys(cache)) { if (!collectionKeys.has(k)) delete cache[k]; }
         lastIndexReqs = reqs;
-        const send = (rows: IndexRow[]) => { if (rows.length && idxAlive()) collectionView.webContents.send('collection:index', rows); };
 
         const cached: IndexRow[] = [];
         const todo: typeof reqs = [];
@@ -1296,7 +1522,7 @@ async function init() {
                 ? [resolved.tracks[resolved.activeIndex]]
                 : resolved.tracks;
             if (req.trackId) {
-                const one = resolved.tracks.find((t) => t.id === toIdStr(req.trackId));
+                const one = resolved.tracks.find((t) => t.id === toIdStr(req.trackId) || t.id === String(req.trackId));
                 if (!one) return { ok: false, error: 'track not found' };
                 tracks = [one];
             } else if (typeof req.trackIndex === 'number' && req.trackIndex >= 0) {
@@ -1312,6 +1538,456 @@ async function init() {
         } catch (err: any) {
             return { ok: false, error: err?.message || 'enqueue failed' };
         }
+    });
+
+    // --- custom playlists (built from the collection view) ---------------------
+    const playlistById = (id: unknown): PlaylistT | undefined =>
+        playlistsDisk.get().find((p) => p && p.id === String(id || ''));
+    const playlistSummaries = () => playlistsDisk.get().map((p) => ({
+        id: p.id, name: p.name, createdAt: p.createdAt, count: p.entries.length,
+        arts: [...new Set(p.entries.map((e) => e.art).filter(Boolean))].slice(0, 4),
+        duration: p.entries.reduce((s, e) => s + (e.duration || 0), 0),
+        desc: p.desc || '',
+        cover: p.cover ? localFileUrl(p.cover) : '',
+    }));
+    ipcMain.handle('playlists:all', () => ({ ok: true, playlists: playlistSummaries() }));
+    ipcMain.handle('playlists:get', (_e, id: unknown) => {
+        const p = playlistById(id);
+        return p ? { ok: true, playlist: { ...p, coverUrl: p.cover ? localFileUrl(p.cover) : '' } } : { ok: false, error: 'not found' };
+    });
+    ipcMain.handle('playlists:create', (_e, name: unknown) => {
+        const n = String(name || '').trim().slice(0, 100);
+        if (!n) return { ok: false, error: 'empty name' };
+        const p: PlaylistT = {
+            id: 'pl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            name: n, createdAt: Date.now(), entries: [],
+        };
+        playlistsDisk.get().push(p);
+        playlistsDisk.save();
+        return { ok: true, id: p.id };
+    });
+    ipcMain.handle('playlists:rename', (_e, req: { id: string; name: string }) => {
+        const p = playlistById(req?.id);
+        const n = String(req?.name || '').trim().slice(0, 100);
+        if (!p || !n) return { ok: false };
+        p.name = n;
+        playlistsDisk.save();
+        return { ok: true };
+    });
+    ipcMain.handle('playlists:delete', (_e, id: unknown) => {
+        const all = playlistsDisk.get();
+        const i = all.findIndex((p) => p && p.id === String(id || ''));
+        if (i === -1) return { ok: false };
+        all.splice(i, 1);
+        playlistsDisk.save();
+        return { ok: true };
+    });
+    // add a whole release (every track) or one song (trackId / trackIndex) to a
+    // playlist. resolution goes through the same path as the tracklist panel, so
+    // anything playable from the collection — owned or wishlisted — can be added.
+    ipcMain.handle('playlists:add', async (_e, req: { id: string; tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
+        try {
+            const p = playlistById(req?.id);
+            if (!p) return { ok: false, error: 'no such playlist' };
+            const resolved = await resolveRelease(req);
+            // a purchased single track adds just itself, not its parent album
+            let tracks = req.tralbumType === 't' && resolved.tracks[resolved.activeIndex]
+                ? [resolved.tracks[resolved.activeIndex]]
+                : resolved.tracks;
+            if (req.trackId) {
+                const one = resolved.tracks.find((t) => t.id === toIdStr(req.trackId) || t.id === String(req.trackId));
+                if (!one) return { ok: false, error: 'track not found' };
+                tracks = [one];
+            } else if (typeof req.trackIndex === 'number' && req.trackIndex >= 0) {
+                const one = resolved.tracks[req.trackIndex];
+                if (!one) return { ok: false, error: 'track not found' };
+                tracks = [one];
+            }
+            if (!tracks.length) return { ok: false, error: 'no tracks' };
+            const have = new Set(p.entries.map((en) => en.tralbumType + en.tralbumId + ':' + en.id));
+            let added = 0;
+            for (const t of tracks) {
+                if (have.has(t.tralbumType + t.tralbumId + ':' + t.id)) continue; // already on it
+                p.entries.push({
+                    id: t.id, title: t.title, artist: t.artist, album: t.album, art: t.art,
+                    duration: t.duration || 0, url: t.url,
+                    bandId: t.bandId, tralbumId: t.tralbumId, tralbumType: t.tralbumType,
+                });
+                added++;
+            }
+            if (added) playlistsDisk.save();
+            return { ok: true, added, count: p.entries.length };
+        } catch (err: any) {
+            return { ok: false, error: err?.message || 'add failed' };
+        }
+    });
+    ipcMain.handle('playlists:remove', (_e, req: { id: string; index: number }) => {
+        const p = playlistById(req?.id);
+        if (!p || !Number.isInteger(req?.index) || req.index < 0 || req.index >= p.entries.length) return { ok: false };
+        p.entries.splice(req.index, 1);
+        playlistsDisk.save();
+        return { ok: true, count: p.entries.length };
+    });
+    ipcMain.handle('playlists:move', (_e, req: { id: string; from: number; to: number }) => {
+        const p = playlistById(req?.id);
+        const n = p ? p.entries.length : 0;
+        const from = Number(req?.from), to = Number(req?.to);
+        if (!p || !Number.isInteger(from) || !Number.isInteger(to) || from < 0 || from >= n || to < 0 || to >= n) return { ok: false };
+        const [en] = p.entries.splice(from, 1);
+        p.entries.splice(to, 0, en);
+        playlistsDisk.save();
+        return { ok: true };
+    });
+    const playlistQueue = (p: PlaylistT): PlayerTrack[] => p.entries.map((e) => {
+        // local entries point straight at the file; bandcamp streams resolve lazily
+        const lt = isLocalId(e.tralbumId) ? localTrackById(e.id) : undefined;
+        return {
+            id: e.id, title: e.title, artist: e.artist, album: e.album, art: e.art,
+            src: lt ? localFileUrl(lt.file) : '', duration: e.duration || 0, url: e.url,
+            bandId: e.bandId, tralbumId: e.tralbumId, tralbumType: e.tralbumType,
+        };
+    });
+    ipcMain.handle('playlists:play', (_e, req: { id: string; startIndex?: number }) => {
+        const p = playlistById(req?.id);
+        if (!p || !p.entries.length) return { ok: false, error: 'empty playlist' };
+        if (!playerView || playerView.webContents.isDestroyed()) return { ok: false, error: 'no player' };
+        const queue = playlistQueue(p);
+        const active = Math.max(0, Math.min(typeof req.startIndex === 'number' ? req.startIndex : 0, queue.length - 1));
+        trapSeq++; // supersede any in-flight page trap
+        playerView.webContents.send('player:stream-incoming', { queue, activeIndex: active, context: 'playlist', format: 'raw' });
+        return { ok: true, count: queue.length };
+    });
+    ipcMain.handle('playlists:enqueue', (_e, id: unknown) => {
+        const p = playlistById(id);
+        if (!p || !p.entries.length) return { ok: false, error: 'empty playlist' };
+        if (!playerView || playerView.webContents.isDestroyed()) return { ok: false, error: 'no player' };
+        playerView.webContents.send('player:enqueue', { tracks: playlistQueue(p) });
+        return { ok: true, count: p.entries.length };
+    });
+    ipcMain.handle('playlists:set-desc', (_e, req: { id: string; desc: string }) => {
+        const p = playlistById(req?.id);
+        if (!p) return { ok: false };
+        p.desc = String(req?.desc || '').slice(0, 2000);
+        playlistsDisk.save();
+        return { ok: true };
+    });
+    // custom cover: picked from disk, normalized to png immediately (that's also
+    // exactly what the download writes out as playlist-cover.png)
+    ipcMain.handle('playlists:cover-pick', async (_e, id: unknown) => {
+        const p = playlistById(id);
+        if (!p) return { ok: false };
+        const res = await dialog.showOpenDialog(mainWindow, {
+            title: 'Choose a playlist cover',
+            properties: ['openFile'],
+            filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+        });
+        if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
+        try {
+            const img = nativeImage.createFromPath(res.filePaths[0]);
+            if (img.isEmpty()) return { ok: false, error: 'could not read that image' };
+            const coversDir = path.join(app.getPath('userData'), 'playlist-covers');
+            fs.mkdirSync(coversDir, { recursive: true });
+            const w = img.getSize().width || 1024;
+            const file = path.join(coversDir, p.id + '.png');
+            fs.writeFileSync(file, (w > 1024 ? img.resize({ width: 1024 }) : img).toPNG());
+            p.cover = file;
+            playlistsDisk.save();
+            return { ok: true, cover: localFileUrl(file) };
+        } catch (err: any) {
+            return { ok: false, error: err?.message || 'cover failed' };
+        }
+    });
+    ipcMain.handle('playlists:cover-clear', (_e, id: unknown) => {
+        const p = playlistById(id);
+        if (!p) return { ok: false };
+        if (p.cover) { try { fs.unlinkSync(p.cover); } catch { /* gone */ } }
+        delete p.cover;
+        playlistsDisk.save();
+        return { ok: true };
+    });
+    // download a whole playlist into <downloads>/<playlist name>/: the tracks in
+    // playlist order (streams tagged like release downloads, local files copied
+    // as-is), playlist-cover.png, description.txt (description + explicit track
+    // order) and the order file in the configured playlist format (m3u default).
+    ipcMain.handle('playlists:download', (_e, id: unknown) => {
+        const p = playlistById(id);
+        if (!p || !p.entries.length) return { ok: false, error: 'empty playlist' };
+        if (streamDlActive) return { ok: false, error: 'a download is already running' };
+        streamDlActive = true;
+        openDownloadsPanel();
+        const entryId = ++dlSeq;
+        const dlState = { canceled: false };
+        streamDownloads.set(entryId, dlState);
+        const entry: DlEntry = { id: entryId, name: `Playlist — ${p.name}`, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
+        dlRegistry.unshift(entry);
+        const prog = (state: string, percent: number) => {
+            entry.state = state;
+            entry.percent = Math.max(0, percent);
+            broadcastDownloads();
+        };
+        void (async () => {
+            try {
+                const fileFmt = store.get('fileNameFmt', '{tracknum} {artist} - {title}') as string;
+                const modifyTags = store.get('modifyTags', true) !== false;
+                const tagOn = (k: string) => store.get(k, true) !== false;
+                const coverInTags = tagOn('coverInTags');
+                const dir = path.join(getDownloadDir(), sanitizeName(p.name) || 'playlist');
+                fs.mkdirSync(dir, { recursive: true });
+                entry.file = dir;
+
+                // playlist-cover.png: the custom cover, else the first entry's art
+                let coverPng: Buffer | null = null;
+                if (p.cover && fs.existsSync(p.cover)) coverPng = fs.readFileSync(p.cover);
+                else {
+                    const webArt = p.entries.find((e) => (e.art || '').startsWith('https://'));
+                    if (webArt) {
+                        const buf = await bandcampApi.fetchBinary(webArt.art);
+                        if (buf && buf.length) {
+                            const img = nativeImage.createFromBuffer(buf);
+                            if (!img.isEmpty()) coverPng = img.toPNG();
+                        }
+                    } else {
+                        const localArt = p.entries.map((e) => localTrackById(e.id)).find((t) => t && t.art && fs.existsSync(t.art));
+                        if (localArt) {
+                            const img = nativeImage.createFromPath(localArt.art);
+                            if (!img.isEmpty()) coverPng = img.toPNG();
+                        }
+                    }
+                }
+                if (coverPng) { try { fs.writeFileSync(path.join(dir, 'playlist-cover.png'), coverPng); } catch { /* disk */ } }
+
+                // description.txt: name, the description, and the explicit order
+                const orderLines = p.entries.map((e, i) => `${String(i + 1).padStart(2, '0')}. ${e.artist} - ${e.title}`);
+                const descTxt = p.name + '\n' + '='.repeat(Math.max(4, Math.min(60, p.name.length))) + '\n\n' +
+                    (p.desc ? p.desc + '\n\n' : '') + 'Track order:\n' + orderLines.join('\n') + '\n';
+                try { fs.writeFileSync(path.join(dir, 'description.txt'), descTxt, 'utf8'); } catch { /* disk */ }
+
+                const artCache = new Map<string, Buffer | null>();
+                const files: { file: string; title: string; artist: string; duration: number }[] = [];
+                for (let i = 0; i < p.entries.length; i++) {
+                    if (dlState.canceled) {
+                        prog('cancelled', Math.round((i / p.entries.length) * 100));
+                        break;
+                    }
+                    const e = p.entries[i];
+                    const pos = i + 1;
+                    entry.name = `${p.name} — ${e.title} (${pos}/${p.entries.length})`;
+                    prog('progressing', Math.round((i / p.entries.length) * 100));
+                    const nameOf = (extension: string) => {
+                        let name = (fileFmt || '{tracknum} {artist} - {title}')
+                            .replace(/\{albumartist\}/gi, sanitizeName(e.artist))
+                            .replace(/\{artist\}/gi, sanitizeName(e.artist))
+                            .replace(/\{album\}/gi, sanitizeName(e.album || p.name))
+                            .replace(/\{title\}/gi, sanitizeName(e.title))
+                            .replace(/\{year\}/gi, '')
+                            .replace(/\{tracknum\}/gi, String(pos).padStart(2, '0'));
+                        if (!name.toLowerCase().endsWith(extension)) name += extension;
+                        return name;
+                    };
+                    try {
+                        const lt = isLocalId(e.tralbumId) ? localTrackById(e.id) : undefined;
+                        if (lt) {
+                            // local file: copied as-is — we never rewrite user files
+                            if (!fs.existsSync(lt.file)) continue;
+                            const file = path.join(dir, nameOf(path.extname(lt.file).toLowerCase() || '.mp3'));
+                            fs.copyFileSync(lt.file, file);
+                            files.push({ file, title: e.title, artist: e.artist, duration: e.duration || 0 });
+                            continue;
+                        }
+                        const track = await bandcampApi.resolveStream({ bandId: e.bandId, tralbumId: e.tralbumId, tralbumType: e.tralbumType, trackId: e.id });
+                        if (!track || !track.src) continue;
+                        const t0 = Date.now();
+                        const buf = await bandcampApi.fetchBinary(track.src);
+                        const dt = (Date.now() - t0) / 1000;
+                        if (!buf || !buf.length) continue;
+                        if (dt > 0) { entry.speed = buf.length / dt; entry.receivedBytes += buf.length; }
+                        let art: Buffer | null = null;
+                        if (coverInTags && (e.art || '').startsWith('https://')) {
+                            if (!artCache.has(e.art)) artCache.set(e.art, await bandcampApi.fetchBinary(e.art));
+                            art = artCache.get(e.art) || null;
+                        }
+                        const file = path.join(dir, nameOf('.mp3'));
+                        if (modifyTags) {
+                            const tag = buildId3v23({
+                                title: tagOn('tagTitle') ? e.title : '',
+                                artist: tagOn('tagArtist') ? e.artist : '',
+                                albumArtist: tagOn('tagAlbumArtist') ? e.artist : '',
+                                album: tagOn('tagAlbum') ? (e.album || p.name) : '',
+                                trackNum: tagOn('tagTrackNum') ? pos : 0,
+                                trackTotal: tagOn('tagTrackNum') ? p.entries.length : undefined,
+                                year: 0,
+                                lyrics: '',
+                                art: art || undefined,
+                            });
+                            fs.writeFileSync(file, Buffer.concat([tag, buf]));
+                        } else {
+                            fs.writeFileSync(file, buf);
+                        }
+                        files.push({ file, title: e.title, artist: e.artist, duration: e.duration || track.duration || 0 });
+                        await new Promise((res) => setTimeout(res, 250)); // gentle on the cdn
+                    } catch { /* skip this entry, carry on */ }
+                }
+
+                if (!dlState.canceled) {
+                    writePlaylistFile(dir, sanitizeName(p.name), p.name, files);
+                    entry.name = `${p.name} (${files.length}/${p.entries.length} tracks)`;
+                    prog(files.length ? 'completed' : 'interrupted', 100);
+                }
+            } catch (err: any) {
+                if (devMode) console.log('[bcrpc] playlist download FAILED ' + (err && (err.message || err)));
+                prog('interrupted', 0);
+            } finally {
+                streamDownloads.delete(entryId);
+                streamDlActive = false;
+                entry.speed = 0;
+                broadcastDownloads();
+            }
+        })();
+        return { ok: true, count: p.entries.length };
+    });
+
+    // --- local files library ----------------------------------------------------
+    // "add files from your pc to your collection": files are parsed ONCE (tags,
+    // duration, embedded art) into the on-disk library index and appear as
+    // pseudo-releases in the collection view. playback goes straight to the file.
+    const announceLocal = () => {
+        const locals = localCollectionItems();
+        if (locals.length && collectionView && !collectionView.webContents.isDestroyed()) {
+            collectionView.webContents.send('collection:items', { items: locals, soFar: locals.length, total: 0 });
+        }
+    };
+    // shared by the "+ Files" picker and the music-folder scan. parsing is
+    // synchronous fs work, so yield the event loop every few files — a big
+    // import must never freeze the main process (the electron-store lesson).
+    const localArtDir = path.join(app.getPath('userData'), 'local-art');
+    const importLocalFiles = async (paths: string[], skipUnchanged: boolean): Promise<{ added: number; updated: number; skipped: number }> => {
+        const lib = localFilesDisk.get();
+        const byId = new Map(lib.map((t, i) => [t.id, i]));
+        let added = 0, updated = 0, skipped = 0, sinceYield = 0;
+        for (const file of paths) {
+            try {
+                if (!AUDIO_EXTENSIONS.includes(path.extname(file).toLowerCase())) continue;
+                const id = 'L' + crypto.createHash('md5').update(file).digest('hex').slice(0, 16);
+                const existing = byId.get(id);
+                let mtime = 0;
+                try { mtime = Math.floor(fs.statSync(file).mtimeMs); } catch { /* keep 0 */ }
+                if (skipUnchanged && existing !== undefined && mtime && lib[existing].mtime === mtime) { skipped++; continue; }
+                const tags = readLocalTags(file);
+                let artPath = '';
+                if (tags.art && tags.art.length) {
+                    try {
+                        fs.mkdirSync(localArtDir, { recursive: true });
+                        artPath = path.join(localArtDir, id + '.jpg');
+                        fs.writeFileSync(artPath, tags.art);
+                    } catch { artPath = ''; }
+                }
+                const entry: LocalTrackT = {
+                    id, file,
+                    title: tags.title,
+                    artist: tags.artist || tags.albumArtist,
+                    album: tags.album,
+                    albumArtist: tags.albumArtist || tags.artist,
+                    year: tags.year, trackNum: tags.trackNum, genre: tags.genre,
+                    duration: tags.duration, art: artPath, mtime,
+                    addedAt: existing !== undefined ? lib[existing].addedAt : Date.now(),
+                };
+                if (existing !== undefined) { lib[existing] = entry; updated++; }
+                else { byId.set(id, lib.length); lib.push(entry); added++; }
+                if (++sinceYield >= 10) { sinceYield = 0; await new Promise<void>((r) => setImmediate(r)); }
+            } catch { /* unreadable file: skip it */ }
+        }
+        if (added || updated) localFilesDisk.save();
+        return { added, updated, skipped };
+    };
+    ipcMain.handle('library:add', async () => {
+        const res = await dialog.showOpenDialog(mainWindow, {
+            title: 'Add audio files to your collection',
+            properties: ['openFile', 'multiSelections'],
+            filters: [
+                { name: 'Audio', extensions: AUDIO_EXTENSIONS.map((e) => e.slice(1)) },
+                { name: 'All files', extensions: ['*'] },
+            ],
+        });
+        if (res.canceled || !res.filePaths.length) return { ok: true, added: 0, canceled: true };
+        const r = await importLocalFiles(res.filePaths, false);
+        if (r.added || r.updated) announceLocal();
+        if (devMode) console.log('[bcrpc] library:add +' + r.added + ' ~' + r.updated);
+        return { ok: true, added: r.added, updated: r.updated };
+    });
+    // music-folder scan: OPT-IN (off until enabled in settings). walks the chosen
+    // folder, imports new/changed audio files, and drops library entries whose
+    // files vanished from the folder. runs at startup, when enabled, after
+    // picking a folder, and via the settings "Scan now" button.
+    let musicScanActive = false;
+    const scanMusicFolder = async (): Promise<{ ok: boolean; scanned?: number; added?: number; updated?: number; removed?: number; error?: string }> => {
+        if (store.get('musicFolderScan', false) !== true) return { ok: false, error: 'scanning is disabled' };
+        const dir = String(store.get('musicFolder', '') || '');
+        if (!dir) return { ok: false, error: 'no music folder selected' };
+        if (!fs.existsSync(dir)) return { ok: false, error: 'music folder does not exist' };
+        if (musicScanActive) return { ok: false, error: 'a scan is already running' };
+        musicScanActive = true;
+        try {
+            const beforeKeys = new Set(localGroups().keys());
+            const found: string[] = [];
+            const walk = (d: string, depth: number): void => {
+                if (depth > 12 || found.length >= 50000) return;
+                let entries: fs.Dirent[] = [];
+                try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+                for (const e of entries) {
+                    if (e.name.startsWith('.')) continue;
+                    const p = path.join(d, e.name);
+                    if (e.isDirectory()) walk(p, depth + 1);
+                    else if (e.isFile() && AUDIO_EXTENSIONS.includes(path.extname(e.name).toLowerCase())) found.push(p);
+                }
+            };
+            walk(dir, 0);
+            const r = await importLocalFiles(found, true);
+            // files gone from the folder leave the library (their audio was the
+            // folder's; manual imports from elsewhere are never touched)
+            const foundSet = new Set(found);
+            const norm = dir.endsWith(path.sep) ? dir : dir + path.sep;
+            const lib = localFilesDisk.get();
+            const keep = lib.filter((t) => !(t.file.startsWith(norm) && !foundSet.has(t.file) && !fs.existsSync(t.file)));
+            const removed = lib.length - keep.length;
+            if (removed) {
+                const keepSet = new Set(keep.map((t) => t.id));
+                for (const t of lib) {
+                    if (!keepSet.has(t.id) && t.art) { try { fs.unlinkSync(t.art); } catch { /* gone */ } }
+                }
+                localFilesDisk.replace(keep);
+            }
+            // tell the view about albums that disappeared, then upsert the rest
+            const afterKeys = new Set(localGroups().keys());
+            const gone = [...beforeKeys].filter((k) => !afterKeys.has(k));
+            if (gone.length && collectionView && !collectionView.webContents.isDestroyed()) {
+                collectionView.webContents.send('collection:remove-keys', gone.map((k) => 'a' + k));
+            }
+            if (r.added || r.updated || removed) announceLocal();
+            if (devMode) console.log(`[bcrpc] music scan: ${found.length} files, +${r.added} ~${r.updated} -${removed} (${r.skipped} unchanged)`);
+            return { ok: true, scanned: found.length, added: r.added, updated: r.updated, removed };
+        } catch (err: any) {
+            return { ok: false, error: err?.message || 'scan failed' };
+        } finally {
+            musicScanActive = false;
+        }
+    };
+    ipcMain.handle('library:scan', () => scanMusicFolder());
+    ipcMain.handle('library:remove', (_e, albumKey: unknown) => {
+        if (!isLocalId(albumKey)) return { ok: false };
+        const want = String(albumKey);
+        const lib = localFilesDisk.get();
+        const keep = lib.filter((t) => localAlbumKey(t) !== want);
+        const removed = lib.length - keep.length;
+        if (!removed) return { ok: false };
+        // library entries and their cached art go; the audio files themselves stay
+        for (const t of lib) {
+            if (localAlbumKey(t) === want && t.art) { try { fs.unlinkSync(t.art); } catch { /* gone */ } }
+        }
+        localFilesDisk.replace(keep);
+        if (collectionView && !collectionView.webContents.isDestroyed()) {
+            collectionView.webContents.send('collection:remove-keys', ['a' + want]);
+        }
+        return { ok: true, removed };
     });
 
     // dragging a cover out of the collection grid exports the FULL-SIZE cover as
@@ -1396,6 +2072,14 @@ async function init() {
 
     // lazily resolve stream url for queued track (collection items only ship metadata; actual stream fetched on demand from tralbum api)
     ipcMain.handle('player:resolve-stream', async (_e, req: ResolveStreamRequest): Promise<ResolveStreamResponse> => {
+        // local library tracks resolve straight to their file on disk
+        if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) {
+            const lt = localTrackById(req?.trackId);
+            if (lt && fs.existsSync(lt.file)) {
+                return { token: req.token, ok: true, src: localFileUrl(lt.file), duration: lt.duration || 0, title: lt.title, artist: lt.artist || lt.albumArtist, art: localFileUrl(lt.art) };
+            }
+            return { token: req.token, ok: false, src: '', duration: 0, error: 'local file missing' };
+        }
         try {
             const track = await bandcampApi.resolveStream({
                 bandId: req.bandId,
@@ -1868,6 +2552,23 @@ async function init() {
         bytes: cacheSizeBytes(),
     }));
 
+    // music folder for the local-files auto-scan (scan itself stays opt-in)
+    ipcMain.handle('settings:choose-music-folder', async () => {
+        const stored = String(store.get('musicFolder', '') || '');
+        let fallback = stored;
+        if (!fallback) { try { fallback = app.getPath('music'); } catch { fallback = app.getPath('home'); } }
+        const res = await dialog.showOpenDialog(settingsWindow || mainWindow, {
+            title: 'Choose your music folder',
+            defaultPath: fallback,
+            properties: ['openDirectory'],
+        });
+        if (res.canceled || !res.filePaths.length) return { ok: false, dir: stored };
+        store.set('musicFolder', res.filePaths[0]);
+        // folder changed while scanning is on: refresh right away
+        if (store.get('musicFolderScan', false) === true) setTimeout(() => { void scanMusicFolder(); }, 300);
+        return { ok: true, dir: res.filePaths[0] };
+    });
+
 
     // settings + last.fm auth bridge
     ipcMain.on('settings:log', (_e, msg: unknown) => { if (devMode) console.log('[bcrpc:settings] ' + String(msg)); });
@@ -1896,8 +2597,11 @@ async function init() {
             playlistNameFmt: String(store.get('playlistNameFmt', '{album}')),
             gridHeaders: store.get('gridHeaders', false) === true,
             headerButtons: getHeaderButtons(),
+            shortcuts: getShortcuts(),
             dlPlaylistFormat: String(store.get('dlPlaylistFormat', 'm3u')),
             downloadDir: getDownloadDir(),
+            musicFolderScan: store.get('musicFolderScan', false) === true,
+            musicFolder: String(store.get('musicFolder', '') || ''),
             theme: getTheme(),
             darkArtistPages: store.get('darkArtistPages', false) === true,
             discordOpts: presenceService.options(),
@@ -1911,6 +2615,13 @@ async function init() {
             if (typeof data.fileNameFmt === 'string') store.set('fileNameFmt', data.fileNameFmt);
             if (typeof data.folderNameFmt === 'string') store.set('folderNameFmt', data.folderNameFmt);
             if (typeof data.modifyTags === 'boolean') store.set('modifyTags', data.modifyTags);
+            if (data.shortcuts && typeof data.shortcuts === 'object') {
+                const clean: Record<string, string> = {};
+                for (const k of Object.keys(SHORTCUT_DEFAULTS)) {
+                    if (typeof data.shortcuts[k] === 'string' && data.shortcuts[k].length <= 40) clean[k] = data.shortcuts[k];
+                }
+                store.set('shortcuts', { ...getShortcuts(), ...clean });
+            }
             for (const k of ['tagTitle', 'tagArtist', 'tagAlbumArtist', 'tagAlbum', 'tagYear', 'tagTrackNum', 'tagLyrics', 'coverInTags', 'coverInFolder']) {
                 if (typeof data[k] === 'boolean') store.set(k, data[k]);
             }
@@ -1923,6 +2634,12 @@ async function init() {
                 presenceService.reconnect(); // apply new app id now
             }
             if (typeof data.autoLoadCollection === 'boolean') store.set('autoLoadCollection', data.autoLoadCollection);
+            if (typeof data.musicFolderScan === 'boolean') {
+                const was = store.get('musicFolderScan', false) === true;
+                store.set('musicFolderScan', data.musicFolderScan);
+                // freshly enabled: scan now instead of waiting for the next boot
+                if (data.musicFolderScan && !was) setTimeout(() => { void scanMusicFolder(); }, 300);
+            }
             if (typeof data.dlPlaylistFormat === 'string' && ['m3u', 'pls', 'wpl', 'zpl', 'none'].includes(data.dlPlaylistFormat)) store.set('dlPlaylistFormat', data.dlPlaylistFormat);
             if (typeof data.cacheReleases === 'boolean') {
                 const wasOn = cacheReleasesOn();
@@ -2188,6 +2905,7 @@ async function init() {
 
         wc.on('before-input-event', (event, input) => {
             if (input.key === 'F12' && input.type === 'keyDown') { wc.toggleDevTools(); event.preventDefault(); }
+            if (handleShortcut(input)) event.preventDefault();
         });
 
         // track when the page's renderer wedges (e.g. bandcamp's >1000 collection
@@ -2218,7 +2936,6 @@ async function init() {
         mainWindow.addBrowserView(tab.view);
         if (collectionVisible && collectionView) mainWindow.setTopBrowserView(collectionView);
         if (feedVisible && feedView) mainWindow.setTopBrowserView(feedView);
-        if (searchVisible && searchView) mainWindow.setTopBrowserView(searchView);
         mainWindow.setTopBrowserView(headerView);
         mainWindow.setTopBrowserView(playerView);
         adjustContentViews();
@@ -2274,6 +2991,7 @@ async function init() {
     // resolve a page url for a now-playing track that has none (e.g. homepage
     // playlist tracks) so the player's title/artist links work
     ipcMain.handle('player:resolve-page', async (_e, req: { trackId?: string; bandId?: string; tralbumId?: string; tralbumType?: TralbumType }) => {
+        if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) return { ok: false, url: '' }; // no page for local files
         try {
             const url = await bandcampApi.resolvePageUrl(req);
             return { ok: Boolean(url), url: url || '' };
@@ -2288,6 +3006,12 @@ async function init() {
     await contentView.webContents.loadURL('https://bandcamp.com');
     mainWindow.show();
     adjustContentViews();
+
+    // opt-in music-folder scan, shortly after startup so it never competes with
+    // the window coming up (no-op unless enabled in settings)
+    if (store.get('musicFolderScan', false) === true) {
+        setTimeout(() => { void scanMusicFolder(); }, 4000);
+    }
 
     // check for app updates in the background (packaged builds only; dev has no
     // update feed & electron-updater would just throw)
@@ -2308,5 +3032,5 @@ app.whenReady().then(init);
 app.on('before-quit', () => {
     isQuitting = true;
     // make sure debounced cache writes hit disk before the process dies
-    try { releaseIndexDisk?.flush(); collectionItemsDisk?.flush(); yearsDisk?.flush(); } catch { /* disk */ }
+    try { releaseIndexDisk?.flush(); collectionItemsDisk?.flush(); yearsDisk?.flush(); playlistsDisk?.flush(); localFilesDisk?.flush(); } catch { /* disk */ }
 });

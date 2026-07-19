@@ -92,6 +92,8 @@ export interface CollectionItem {
     downloadUrl: string;
     /** true for wishlist items (not owned; shown alongside the collection). */
     wish?: boolean;
+    /** true for pseudo-releases built from local audio files (tralbumId 'local:…'). */
+    local?: boolean;
 }
 
 /** one format offered on a download page. */

@@ -123,6 +123,16 @@
     </div>
 
     <div class="section">
+        <h2>Keybinds</h2>
+        <div class="hint" style="margin-bottom:10px;">click a keybind, then press the new combination — or press Esc/Backspace to remove the keybind ("none" = shortcut disabled; click the button again to cancel). combinations need Ctrl/Alt to avoid clashing with typing &amp; media keys.</div>
+        <div class="row" style="margin-top:6px;"><span style="font-size:12px;color:#cfcac2;">open collection</span><button class="ghost kb" id="kbCollection" style="margin:0;min-width:130px;"></button></div>
+        <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#cfcac2;">open feed</span><button class="ghost kb" id="kbFeed" style="margin:0;min-width:130px;"></button></div>
+        <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#cfcac2;">go to homepage</span><button class="ghost kb" id="kbHome" style="margin:0;min-width:130px;"></button></div>
+        <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#cfcac2;">open downloads</span><button class="ghost kb" id="kbDownloads" style="margin:0;min-width:130px;"></button></div>
+        <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#cfcac2;">open search</span><button class="ghost kb" id="kbSearch" style="margin:0;min-width:130px;"></button></div>
+    </div>
+
+    <div class="section">
         <h2>Storage</h2>
         <label style="margin-top:0;">Download location</label>
         <div class="row" style="gap:8px;margin-top:2px;">
@@ -160,6 +170,16 @@
         </div>
         <div class="hint" id="cacheSize" style="margin:6px 0 0;"></div>
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
+        <label class="toggle" style="margin-top:0;"><input type="checkbox" id="musicFolderScan"> automatically scan a music folder for audio files (adds them to your collection as local releases)</label>
+        <div id="musicFolderOpts" style="margin-top:8px;">
+            <div class="row" style="gap:8px;margin-top:2px;">
+                <input type="text" id="musicFolder" readonly style="flex:1;" placeholder="no folder selected" title="folder scanned for audio files">
+                <button id="btnMusicFolder" class="ghost" style="margin-top:0;white-space:nowrap;">Change…</button>
+                <button id="btnScanNow" class="ghost" style="margin-top:0;white-space:nowrap;">Scan now</button>
+            </div>
+            <div class="hint" id="scanStatus" style="margin:6px 0 0;">Off by default. When enabled, the folder is scanned at startup and on save; files removed from it drop out of the collection.</div>
+        </div>
+        <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
         <label style="margin-top:0;">Playlist file for stream downloads</label>
         <select id="dlPlaylistFormat" style="width:100%;background:#121415;border:1px solid #2a2e30;border-radius:5px;color:#e8e6e3;padding:8px 10px;font-size:12px;">
             <option value="m3u">m3u</option>
@@ -189,6 +209,48 @@
         }
         const $ = (id) => document.getElementById(id);
         const log = (m) => { try { ipcRenderer && ipcRenderer.send('settings:log', m); } catch (e) {} };
+
+        // keybind capture: click a button, press the combo. stored as
+        // "Ctrl+Shift+X" strings matching main's accelOfInput format.
+        const KB_DEFAULTS = { collection: 'Ctrl+Shift+C', feed: 'Ctrl+Shift+F', home: 'Ctrl+Shift+H', downloads: 'Ctrl+Shift+D', search: 'Ctrl+K' };
+        const KB_IDS = { collection: 'kbCollection', feed: 'kbFeed', home: 'kbHome', downloads: 'kbDownloads', search: 'kbSearch' };
+        let kbState = Object.assign({}, KB_DEFAULTS);
+        let kbRecording = null; // action name while capturing
+        function kbRender() {
+            for (const k in KB_IDS) {
+                const b = $(KB_IDS[k]);
+                const unbound = kbState[k] === '';
+                b.textContent = kbRecording === k ? 'press keys…' : (unbound ? 'none' : (kbState[k] || KB_DEFAULTS[k]));
+                b.style.borderColor = kbRecording === k ? '#1da0c3' : '';
+                b.style.opacity = unbound && kbRecording !== k ? '.55' : '1';
+            }
+        }
+        for (const k in KB_IDS) {
+            $(KB_IDS[k]).addEventListener('click', () => { kbRecording = kbRecording === k ? null : k; kbRender(); });
+        }
+        document.addEventListener('keydown', (e) => {
+            if (!kbRecording) return;
+            e.preventDefault(); e.stopPropagation();
+            // Esc / Backspace / Delete REMOVE the binding ("none" = disabled);
+            // cancelling a recording is done by clicking the button again
+            if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'Delete') {
+                kbState[kbRecording] = '';
+                kbRecording = null;
+                kbRender();
+                return;
+            }
+            if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for the real key
+            if (!e.ctrlKey && !e.altKey && !e.metaKey) return; // must include a real modifier
+            const parts = [];
+            if (e.ctrlKey) parts.push('Ctrl');
+            if (e.altKey) parts.push('Alt');
+            if (e.metaKey) parts.push('Cmd');
+            if (e.shiftKey) parts.push('Shift');
+            parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+            kbState[kbRecording] = parts.join('+');
+            kbRecording = null;
+            kbRender();
+        }, true);
 
         // custom titlebar close (frameless window)
         $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
@@ -286,12 +348,20 @@
             for (const k of ['tagTitle', 'tagArtist', 'tagAlbumArtist', 'tagAlbum', 'tagYear', 'tagTrackNum', 'tagLyrics', 'coverInTags', 'coverInFolder']) {
                 $(k).checked = s[k] !== false;
             }
+            kbState = Object.assign({}, KB_DEFAULTS, s.shortcuts || {});
+            kbRender();
             $('coverNameFmt').value = s.coverNameFmt || 'cover';
             $('playlistNameFmt').value = s.playlistNameFmt || '{album}';
             // the per-tag list only matters while tag writing is on
             const syncTagOpts = () => { $('tagOpts').style.opacity = $('modifyTags').checked ? '1' : '.4'; };
             $('modifyTags').addEventListener('change', syncTagOpts);
             syncTagOpts();
+            // music-folder scan: OFF by default; the folder row dims until enabled
+            $('musicFolderScan').checked = s.musicFolderScan === true;
+            $('musicFolder').value = s.musicFolder || '';
+            const syncScanOpts = () => { $('musicFolderOpts').style.opacity = $('musicFolderScan').checked ? '1' : '.4'; };
+            $('musicFolderScan').addEventListener('change', syncScanOpts);
+            syncScanOpts();
         }
 
         async function persist() {
@@ -318,8 +388,10 @@
                 coverNameFmt: $('coverNameFmt').value.trim() || 'cover',
                 playlistNameFmt: $('playlistNameFmt').value.trim() || '{album}',
                 headerButtons: currentHbState,
+                shortcuts: kbState,
                 closeToTray: $('closeToTray').checked,
                 autoLoadCollection: $('autoLoadCollection').checked,
+                musicFolderScan: $('musicFolderScan').checked,
                 cacheReleases: $('cacheReleases').checked,
                 theme: $('darkMode').checked ? 'dark' : 'light',
                 darkArtistPages: !$('noDarkArtistPages').checked
@@ -344,6 +416,24 @@
                 const res = await ipcRenderer.invoke('settings:choose-cache-dir');
                 if (res && res.dir) $('cacheDir').value = res.dir;
                 refreshCacheInfo();
+            };
+
+            $('btnMusicFolder').onclick = async () => {
+                const res = await ipcRenderer.invoke('settings:choose-music-folder');
+                if (res && res.dir) $('musicFolder').value = res.dir;
+            };
+
+            // save first so a just-ticked checkbox counts, then scan
+            $('btnScanNow').onclick = async () => {
+                $('scanStatus').textContent = 'scanning…';
+                await persist();
+                const res = await ipcRenderer.invoke('library:scan');
+                if (res && res.ok) {
+                    $('scanStatus').textContent = `scanned ${res.scanned} files: ${res.added} new, ${res.updated} updated` +
+                        (res.removed ? `, ${res.removed} removed` : '') + '.';
+                } else {
+                    $('scanStatus').textContent = 'scan failed: ' + ((res && res.error) || '?');
+                }
             };
 
 

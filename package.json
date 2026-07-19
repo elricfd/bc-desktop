@@ -1,6 +1,6 @@
 {
     "name": "bc-desktop",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "description": "🎵 A standalone Bandcamp Desktop Client with Linux/Win/Mac support and Discord Rich Presence",
     "author": "elricfd <elric@bu.edu>",
     "license": "GPL-2.0-or-later",
