@@ -359,13 +359,18 @@ function forceRender(): void {
 
 // track list view: every track of every (filtered) release as one flat table.
 // track rows come from the release index; releases not indexed yet render as a
-// single album row. rendered in chunks so a 20k-row collection stays snappy.
-interface ListRow { it: CollectionItem | null; trackIdx: number; title: string; dur: number; isAlbumRow: boolean; genreHead?: string }
+// single album row. the table is VIRTUALIZED: the full row model is computed,
+// but only the rows in (and around) the viewport get DOM — genre grouping
+// duplicates every release under each of its tags, so a big collection easily
+// exceeds 50k rows and a one-shot render froze the view for many seconds.
+// fixed row heights make the offsets exact, so the scrollbar never jumps and
+// jumping to a group is a plain scrollTop seek.
+interface ListRow {
+    it: CollectionItem | null; trackIdx: number; title: string; dur: number; isAlbumRow: boolean; genreHead?: string;
+    /** cached lowercase sort keys (localeCompare per comparison was the other half of the freeze) */
+    aL?: string; tL?: string; albL?: string;
+}
 let listRows: ListRow[] = [];
-let listRendered = 0;
-// render the whole table at once: chunked lazy-append made the scrollbar jump
-// around and meant the "full" list was never actually all there
-const LIST_CHUNK = Number.MAX_SAFE_INTEGER;
 // list view sorts by clicking column headers (the toolbar dropdown is grid-only)
 type ListSortKey = 'num' | 'artist' | 'title' | 'album' | 'year' | 'genre' | 'time';
 let listSort: { key: ListSortKey; desc: boolean } = { key: 'artist', desc: false };
@@ -390,9 +395,11 @@ const GROUPED_KEYS: ListSortKey[] = ['genre', 'artist', 'album', 'year'];
 
 function applyListSort(rows: ListRow[]): ListRow[] {
     const dir = listSort.desc ? -1 : 1;
-    const s = (x: string) => x.toLowerCase();
+    // plain string compares on the precomputed lowercase keys: localeCompare is
+    // ICU-slow and ran O(n log n) times over tens of thousands of rows
+    const cmpStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
     const tiebreak = (a: ListRow, b: ListRow) =>
-        s(a.it!.artist).localeCompare(s(b.it!.artist)) || s(a.it!.title).localeCompare(s(b.it!.title)) || a.trackIdx - b.trackIdx;
+        cmpStr(a.aL || '', b.aL || '') || cmpStr(a.albL || '', b.albL || '') || a.trackIdx - b.trackIdx;
 
     if (GROUPED_KEYS.includes(listSort.key)) {
         // bucket rows by group, order groups alphabetically (years numerically),
@@ -424,13 +431,13 @@ function applyListSort(rows: ListRow[]): ListRow[] {
 
     const val = (r: ListRow): number | string =>
         listSort.key === 'num' ? r.trackIdx :
-        listSort.key === 'artist' ? s(r.it!.artist) :
-        listSort.key === 'title' ? s(r.title) :
-        listSort.key === 'album' ? s(r.it!.title) :
+        listSort.key === 'artist' ? (r.aL || '') :
+        listSort.key === 'title' ? (r.tL || '') :
+        listSort.key === 'album' ? (r.albL || '') :
         r.dur; // time
     rows.sort((a, b) => {
         const va = val(a), vb = val(b);
-        const c = typeof va === 'number' ? (va as number) - (vb as number) : (va as string).localeCompare(vb as string);
+        const c = typeof va === 'number' ? (va as number) - (vb as number) : cmpStr(va as string, vb as string);
         return (c || tiebreak(a, b)) * dir;
     });
     return rows;
@@ -442,8 +449,10 @@ function buildListRows(list: CollectionItem[]): ListRow[] {
     for (const it of list) {
         const idx = searchIndex.get(it.tralbumType + it.tralbumId);
         const tracks = idx ? idx.tracks : [];
+        const aL = (it.artist || '').toLowerCase();
+        const albL = (it.title || '').toLowerCase();
         if (!tracks.length) {
-            rows.push({ it, trackIdx: 0, title: it.title, dur: 0, isAlbumRow: true });
+            rows.push({ it, trackIdx: 0, title: it.title, dur: 0, isAlbumRow: true, aL, tL: albL, albL });
             continue;
         }
         // when the release only matched the query via its index blob, narrow to the
@@ -451,26 +460,31 @@ function buildListRows(list: CollectionItem[]): ListRow[] {
         const releaseMatches = !q || (it.artist + ' ' + it.title).toLowerCase().includes(q)
             || (idx as IndexEntry).tags.join(' ').toLowerCase().includes(q);
         tracks.forEach(([title, dur], i) => {
-            if (releaseMatches || title.toLowerCase().includes(q)) {
-                rows.push({ it, trackIdx: i, title, dur, isAlbumRow: false });
+            const tL = (title || '').toLowerCase();
+            if (releaseMatches || tL.includes(q)) {
+                rows.push({ it, trackIdx: i, title, dur, isAlbumRow: false, aL, tL, albL });
             }
         });
     }
     return rows;
 }
 
-function appendListChunk(): void {
-    const frag = document.createDocumentFragment();
-    const end = Math.min(listRows.length, listRendered + LIST_CHUNK);
-    for (let i = listRendered; i < end; i++) {
-        const r = listRows[i];
-        if (r.genreHead !== undefined) {
-            const h = document.createElement('div');
-            h.className = 'lv-genrehead';
-            h.textContent = r.genreHead;
-            frag.appendChild(h);
-            continue;
-        }
+// --- virtual scroller for the list view --------------------------------------
+const LV_ROW_H = 34;
+const LV_HEAD_H = 38;
+let lvOffsets: number[] = []; // y of each row inside the spacer
+let lvSpace: HTMLElement | null = null;
+let lvRangeStart = -1;
+let lvRangeEnd = -1;
+
+function lvBuildRowEl(i: number): HTMLElement {
+    const r = listRows[i];
+    let el: HTMLElement;
+    if (r.genreHead !== undefined) {
+        el = document.createElement('div');
+        el.className = 'lv-genrehead';
+        el.textContent = r.genreHead;
+    } else {
         const it = r.it as CollectionItem;
         const idx = searchIndex.get(it.tralbumType + it.tralbumId);
         const rowTags = idx ? idx.tags.slice(0, 3) : [];
@@ -492,17 +506,45 @@ function appendListChunk(): void {
             play(it, r.trackIdx);
         });
         row.addEventListener('contextmenu', (e) => { e.preventDefault(); openRowMenu(e, r); });
-        frag.appendChild(row);
+        el = row;
     }
-    grid.appendChild(frag);
-    listRendered = end;
+    el.style.position = 'absolute';
+    el.style.left = '0';
+    el.style.right = '0';
+    el.style.top = lvOffsets[i] + 'px';
+    return el;
 }
+
+// first row whose top is <= y (binary search over the fixed offsets)
+function lvFirstAt(y: number): number {
+    let lo = 0, hi = lvOffsets.length - 1, ans = 0;
+    while (lo <= hi) {
+        const m = (lo + hi) >> 1;
+        if (lvOffsets[m] <= y) { ans = m; lo = m + 1; } else hi = m - 1;
+    }
+    return ans;
+}
+
+// materialize only the rows in (and just around) the viewport
+function lvRenderVisible(force = false): void {
+    if (!lvSpace || viewMode !== 'list' || !listRows.length) return;
+    const yTop = Math.max(0, grid.scrollTop - lvSpace.offsetTop);
+    const first = Math.max(0, lvFirstAt(yTop) - 10);
+    const last = Math.min(listRows.length - 1, lvFirstAt(yTop + grid.clientHeight) + 10);
+    if (!force && first === lvRangeStart && last === lvRangeEnd) return;
+    lvRangeStart = first;
+    lvRangeEnd = last;
+    const frag = document.createDocumentFragment();
+    for (let i = first; i <= last; i++) frag.appendChild(lvBuildRowEl(i));
+    lvSpace.replaceChildren(frag);
+}
+grid.addEventListener('scroll', () => { if (viewMode === 'list') lvRenderVisible(); });
 
 function renderList(list: CollectionItem[]): void {
     closeTracklist();
     grid.innerHTML = '';
+    lvSpace = null;
     listRows = applyListSort(buildListRows(list));
-    listRendered = 0;
     if (!listRows.length) {
         setState(loading ? 'nothing matches yet — still loading…' : 'nothing matches your search.');
         return;
@@ -533,7 +575,21 @@ function renderList(list: CollectionItem[]): void {
         head.appendChild(sp);
     }
     grid.appendChild(head);
-    appendListChunk();
+    // fixed-height rows -> exact offsets; the spacer owns the full scroll height
+    // and only the visible slice ever exists in the DOM
+    lvOffsets = new Array(listRows.length);
+    let y = 0;
+    for (let i = 0; i < listRows.length; i++) {
+        lvOffsets[i] = y;
+        y += listRows[i].genreHead !== undefined ? LV_HEAD_H : LV_ROW_H;
+    }
+    lvSpace = document.createElement('div');
+    lvSpace.style.position = 'relative';
+    lvSpace.style.height = y + 'px';
+    grid.appendChild(lvSpace);
+    lvRangeStart = -1;
+    lvRangeEnd = -1;
+    lvRenderVisible(true);
 }
 
 
@@ -560,19 +616,26 @@ function jumpToListGroup(key: ListSortKey, label: string): void {
     listSort = { key, desc: false };
     if (key === 'year') requestYears();
     setViewMode('list');
+    // seek in the row MODEL, not the DOM — with the virtual scroller only the
+    // viewport's rows exist, but every group header is present in listRows
     const target = label.trim().toLowerCase();
-    const heads = Array.from(grid.querySelectorAll('.lv-genrehead')) as HTMLElement[];
-    let exact: HTMLElement | null = null;
-    let nearest: HTMLElement | null = null;
-    for (const h of heads) {
-        const name = (h.textContent || '').trim().toLowerCase();
-        if (name === target) { exact = h; break; }
+    let exact = -1;
+    let nearest = -1;
+    let lastHead = -1;
+    for (let i = 0; i < listRows.length; i++) {
+        if (listRows[i].genreHead === undefined) continue;
+        lastHead = i;
+        const name = (listRows[i].genreHead as string).trim().toLowerCase();
+        if (name === target) { exact = i; break; }
         // first group alphabetically past the target = where it would have been
-        if (!nearest && !name.startsWith('(') && name.localeCompare(target) > 0) nearest = h;
+        if (nearest === -1 && !name.startsWith('(') && name.localeCompare(target) > 0) nearest = i;
     }
-    const head = exact || nearest || (heads.length ? heads[heads.length - 1] : null);
+    const idx = exact !== -1 ? exact : (nearest !== -1 ? nearest : lastHead);
     // manual scroll (scrollIntoView would tuck the header under the sticky column bar)
-    if (head) grid.scrollTop = Math.max(0, head.offsetTop - 38);
+    if (idx !== -1 && lvSpace) {
+        grid.scrollTop = Math.max(0, lvSpace.offsetTop + lvOffsets[idx] - 38);
+        lvRenderVisible();
+    }
 }
 
 // right-click a list row: play / add to queue (the row's single track, or the
@@ -791,7 +854,10 @@ function repositionTracklist(): void {
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(repositionTracklist, 80);
+    resizeTimer = setTimeout(() => {
+        repositionTracklist();
+        lvRenderVisible(true); // viewport height changed: refresh the visible slice
+    }, 80);
 });
 
 let menuEl: HTMLElement | null = null;

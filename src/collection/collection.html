@@ -40,6 +40,9 @@
         }
         .tbtn:hover { border-color: var(--accent); }
         .grid {
+            /* positioned so children's offsetTop is grid-relative (the list
+               view's virtual scroller does exact offset math against it) */
+            position: relative;
             flex: 1; overflow-y: auto; padding: 16px;
             display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; align-content: start;
             /* the page-wide rules hide every scrollbar; the collection is the one
@@ -184,8 +187,10 @@
         .lv-head span { cursor: pointer; user-select: none; }
         .lv-head span:hover { color: var(--text); }
         .lv-head span.on { color: var(--accent); }
+        /* fixed height: the virtual scroller computes row offsets from constants */
         .lv-genrehead {
-            padding: 14px 18px 5px; font-size: 12px; font-weight: 600; color: var(--accent);
+            height: 38px; padding: 0 18px 5px; display: flex; align-items: flex-end;
+            font-size: 12px; font-weight: 600; color: var(--accent);
             border-bottom: 1px solid var(--line);
         }
         .lv-row { height: 34px; font-size: 13px; cursor: pointer; }
