@@ -762,6 +762,23 @@ export class BandcampApi {
     // --- stream downloads (unowned releases) ---------------------------------
 
     /**
+     * crude html→plain-text for scraped lyric rows. tag stripping loops to a
+     * fixed point so nested/split tags can never leave residue like "<script",
+     * and entities decode AFTER the strip with &amp; handled LAST — decoding it
+     * first turned "&amp;quot;" into '"' (double-unescape). the output is only
+     * ever written into id3 text frames, never rendered as html.
+     */
+    private htmlToText(html: string): string {
+        let s = String(html || '').replace(/<br\s*\/?>/gi, '\n');
+        for (let prev = ''; prev !== s;) { prev = s; s = s.replace(/<[^>]*>/g, ''); }
+        return s
+            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").replace(/&nbsp;/g, ' ')
+            .replace(/&amp;/g, '&')
+            .trim();
+    }
+
+    /**
      * everything needed to download a release's streams with proper tags: album,
      * album artist, year, cover url, and per-track title/artist/number/lyrics/
      * stream url. accepts a page url (richest payload — the page blob can carry
@@ -795,7 +812,7 @@ export class BandcampApi {
                                 if (t && !t.lyrics && t.track_num) {
                                     const lm = html.match(new RegExp('id="lyrics_row_' + t.track_num + '"[^>]*>([\\s\\S]*?)</tr>', 'i'));
                                     if (lm) {
-                                        const text = lm[1].replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+                                        const text = this.htmlToText(lm[1]);
                                         if (text) t.lyrics = text;
                                     }
                                 }
