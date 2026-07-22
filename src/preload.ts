@@ -141,12 +141,25 @@ document.addEventListener('keydown', (e) => {
 // mapped here (not in main) so typing in the page's inputs is never hijacked.
 // NOTE: keep in sync with player.ts / collection.ts / header.html — this preload
 // is sandboxed so the mapping can't live in a shared module.
+const isTypingEl = (el: any): boolean => {
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
+};
 const mediaHotkeyOf = (e: KeyboardEvent): string => {
-    const t = e.target as HTMLElement | null;
-    const tag = t ? t.tagName : '';
-    if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
+    // bandcamp's header search lives in a web component: at the document
+    // boundary the event RETARGETS to the shadow host, so e.target alone never
+    // says INPUT and space fell through to play/pause while typing a query.
+    // resolve the real element via composedPath + the shadow-piercing active
+    // element, and bail if any of them is a typing surface.
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    const deep = (path.length ? path[0] : e.target) as HTMLElement | null;
+    let ae: any = document.activeElement;
+    while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) ae = ae.shadowRoot.activeElement;
+    if (isTypingEl(deep) || isTypingEl(ae) || isTypingEl(e.target)) return '';
+    const tag = deep ? deep.tagName : '';
     const space = e.key === ' ' || e.code === 'Space';
-    if (space && tag === 'BUTTON') return '';
+    if (space && (tag === 'BUTTON' || (ae && ae.tagName === 'BUTTON'))) return '';
     if (space) return 'toggle';
     if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : 'seek-back';
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
