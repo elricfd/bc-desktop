@@ -3077,19 +3077,48 @@ async function init() {
         setTimeout(() => { void scanMusicFolder(); }, 4000);
     }
 
-    // check for app updates in the background (packaged builds only; dev has no
-    // update feed & electron-updater would just throw)
+    // --- auto updates (packaged builds only; dev has no update feed) ----------
+    // the feed is set EXPLICITLY at runtime: builds shipped before the publish
+    // repo was corrected have app-update.yml baked pointing at bandcamp-rpc
+    // (which has no releases), so the built-in feed 404'd silently forever.
+    // status is tracked and streamed to the settings window's About section.
+    let updStatus: { state: string; info: string } = { state: 'idle', info: '' };
+    const pushUpdStatus = (state: string, info = '') => {
+        updStatus = { state, info };
+        if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.webContents.send('updates:status', updStatus);
+    };
     if (app.isPackaged) {
         try {
+            autoUpdater.setFeedURL({ provider: 'github', owner: 'elricfd', repo: 'bc-desktop' });
             autoUpdater.autoDownload = true;
-            autoUpdater.on('update-downloaded', () => {
+            autoUpdater.on('checking-for-update', () => pushUpdStatus('checking'));
+            autoUpdater.on('update-available', (info: any) => pushUpdStatus('downloading', String(info?.version || '')));
+            autoUpdater.on('download-progress', (p: any) => pushUpdStatus('downloading', Math.round(Number(p?.percent) || 0) + '%'));
+            autoUpdater.on('update-not-available', () => pushUpdStatus('latest'));
+            autoUpdater.on('error', (err: any) => pushUpdStatus('error', String((err && (err.message || err)) || 'update check failed').slice(0, 200)));
+            autoUpdater.on('update-downloaded', (info: any) => {
+                pushUpdStatus('downloaded', String(info?.version || ''));
                 if (headerView && !headerView.webContents.isDestroyed()) {
                     headerView.webContents.send('download:progress', { name: 'update ready — restart to install', percent: 100, state: 'completed' });
                 }
             });
             autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+            // long-running sessions still pick updates up
+            setInterval(() => { autoUpdater.checkForUpdatesAndNotify().catch(() => {}); }, 4 * 60 * 60 * 1000);
         } catch { /* no update feed configured */ }
     }
+    ipcMain.handle('updates:info', () => ({ version: app.getVersion(), packaged: app.isPackaged, status: updStatus }));
+    ipcMain.handle('updates:check', async () => {
+        if (!app.isPackaged) return { ok: false, error: 'dev build — self-update only works in packaged installs' };
+        try {
+            await autoUpdater.checkForUpdates();
+            return { ok: true };
+        } catch (err: any) {
+            pushUpdStatus('error', String(err?.message || 'update check failed').slice(0, 200));
+            return { ok: false, error: err?.message || 'check failed' };
+        }
+    });
+    ipcMain.on('updates:install', () => { try { autoUpdater.quitAndInstall(); } catch { /* nothing downloaded */ } });
 }
 
 app.whenReady().then(init);
