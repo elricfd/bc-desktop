@@ -759,6 +759,22 @@ export class BandcampApi {
         }
     }
 
+    // --- bandcamp fan playlists (import) -------------------------------------
+
+    /** fetch + parse a fan playlist page (bandcamp.com/playlist/…). */
+    async fetchBandcampPlaylist(url: string): Promise<BandcampPlaylistPage> {
+        this.noteInteractive();
+        const session = this.getSession();
+        if (!session) return playlistPageError('app session not ready');
+        try {
+            const r = await session.fetch(url, { credentials: 'include' } as any);
+            if (!r.ok) return playlistPageError(`page fetch failed (${r.status})`);
+            return parseBandcampPlaylistHtml(await r.text());
+        } catch (err: any) {
+            return playlistPageError(err?.message || 'fetch failed');
+        }
+    }
+
     // --- stream downloads (unowned releases) ---------------------------------
 
     /**
@@ -905,4 +921,74 @@ export class BandcampApi {
         }
         return formatUrl;
     }
+}
+
+// --- bandcamp fan playlist page parsing --------------------------------------
+// a /playlist/<id> page ships a data-blob attribute whose appData carries the
+// playlist (title/description/imageId) and every track with its band id, parent
+// album id, art id and duration — exactly the resolver handles our own playlist
+// entries store. stream urls in the blob are short-lived and deliberately
+// ignored; playback resolves lazily like everything else.
+
+export interface BandcampPlaylistTrack {
+    id: string;
+    title: string;
+    artist: string;
+    album: string;
+    /** parent album id; '' for standalone tracks */
+    albumId: string;
+    bandId: string;
+    artId: string;
+    duration: number;
+    url: string;
+}
+
+export interface BandcampPlaylistPage {
+    ok: boolean;
+    error?: string;
+    playlistId: number;
+    title: string;
+    description: string;
+    imageId: number;
+    tracks: BandcampPlaylistTrack[];
+}
+
+export function playlistPageError(error: string): BandcampPlaylistPage {
+    return { ok: false, error, playlistId: 0, title: '', description: '', imageId: 0, tracks: [] };
+}
+
+/** pure parser so it can be tested against saved pages (no network). */
+export function parseBandcampPlaylistHtml(html: string): BandcampPlaylistPage {
+    const m = String(html || '').match(/data-blob="([^"]+)"/);
+    if (!m) return playlistPageError('no page data found (is that a playlist url?)');
+    let blob: any = null;
+    // attribute unescape: &amp; strictly LAST or "&amp;quot;" double-unescapes
+    try {
+        blob = JSON.parse(m[1]
+            .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&'));
+    } catch { return playlistPageError('unreadable page data'); }
+    const appData = blob?.appData;
+    const rows: any[] = appData?.tracklist?.tracks;
+    if (!appData || !Array.isArray(rows)) return playlistPageError('not a bandcamp playlist page');
+    const tracks: BandcampPlaylistTrack[] = rows.map((t: any) => ({
+        id: toId(t?.id),
+        title: String(t?.title || '').trim() || 'untitled',
+        artist: String(t?.artistName || '').trim(),
+        album: String(t?.album?.title || '').trim(),
+        albumId: toId(t?.album?.id),
+        bandId: toId(t?.bandId),
+        artId: toId(t?.artId ?? t?.album?.artId),
+        duration: Math.max(0, Math.round(Number(t?.duration) || 0)),
+        url: typeof t?.url === 'string' ? t.url : '',
+    })).filter((t) => t.id);
+    return {
+        ok: true,
+        playlistId: Number(appData.playlistId) || 0,
+        title: String(appData.title || '').trim() || 'Imported playlist',
+        description: String(appData.description || ''),
+        imageId: Number(appData.imageId) || 0,
+        tracks,
+    };
 }

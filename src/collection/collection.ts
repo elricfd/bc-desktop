@@ -861,7 +861,8 @@ window.addEventListener('resize', () => {
 });
 
 let menuEl: HTMLElement | null = null;
-function closeMenu(): void { if (menuEl) { menuEl.remove(); menuEl = null; } }
+let menuClosedAt = 0; // lets opener buttons act as toggles despite the capture-closer
+function closeMenu(): void { if (menuEl) { menuEl.remove(); menuEl = null; menuClosedAt = Date.now(); } }
 
 function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
     const r = anchor.getBoundingClientRect();
@@ -901,7 +902,14 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
     }
     positionMenu(menu, anchor); 
 }
-document.addEventListener('click', () => closeMenu());
+// CAPTURE phase, with an outside-click check: the tracklist panel (and other
+// zones) stopPropagation on bubble, which used to strand open menus — the
+// playlist picker opened from a track row could only be dismissed by opening
+// another album. capture fires before any stopPropagation can interfere, and
+// the contains() check keeps clicks inside the menu working.
+document.addEventListener('click', (e) => {
+    if (menuEl && !menuEl.contains(e.target as Node)) closeMenu();
+}, true);
 // esc peels one layer at a time: menu -> playlist detail -> playlists panel -> tracklist
 document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
@@ -972,26 +980,74 @@ dirBtn.addEventListener('click', () => {
     dirBtn.textContent = descending ? '↓' : '↑';
     forceRender();
 });
-$('refresh').addEventListener('click', (e) => {
-    fullRescan = (e as MouseEvent).shiftKey; // shift+click re-scans everything
+$('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
+
+function reloadCollection(full: boolean): void {
+    fullRescan = full;
     items = [];
     itemKeys.clear();
     yearsRequested = false;
     load();
-});
-$('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
+}
 
-// import audio files from the pc into the collection (local pseudo-releases);
-// main parses tags/duration/art and streams the new items back over collection:items
-const addLocalBtn = $('addlocal');
-addLocalBtn.addEventListener('click', async () => {
-    const prev = addLocalBtn.textContent;
-    addLocalBtn.textContent = 'importing…';
-    try {
-        const r = await ipcRenderer.invoke('library:add');
-        addLocalBtn.textContent = r && r.ok && !r.canceled ? `added ${r.added || 0} ✓` : prev;
-    } catch { addLocalBtn.textContent = '× failed'; }
-    setTimeout(() => { addLocalBtn.textContent = prev; }, 1400);
+// transient toast for async action feedback (imports etc.)
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+function collToast(msg: string): void {
+    let el = document.getElementById('ctoast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'ctoast';
+        el.className = 'ctoast';
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el && el.classList.remove('on'), 2800);
+}
+
+// ⋯ overflow menu: the toolbar was drowning in buttons, so the occasional
+// actions (local file import, reloads, bandcamp playlist import) live here
+$('more').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menuEl || Date.now() - menuClosedAt < 200) { closeMenu(); return; } // toggle
+    const menu = document.createElement('div');
+    menu.className = 'dlmenu';
+    menu.addEventListener('click', (ev) => ev.stopPropagation());
+    const mk = (label: string, fn: (b: HTMLButtonElement) => void) => {
+        const b = document.createElement('button');
+        b.className = 'dlfmt';
+        b.textContent = label;
+        b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(b); });
+        menu.appendChild(b);
+    };
+    mk('＋ Add local files…', async (b) => {
+        b.textContent = 'importing…';
+        const r = await ipcRenderer.invoke('library:add').catch(() => null);
+        closeMenu();
+        if (r && r.ok && !r.canceled) collToast(`added ${r.added || 0} file${r.added === 1 ? '' : 's'}` + (r.updated ? ` (${r.updated} updated)` : ''));
+    });
+    mk('♫ Import Bandcamp playlist…', async () => {
+        closeMenu();
+        const url = await textPrompt('Bandcamp playlist URL', '');
+        if (!url) return;
+        collToast('importing playlist…');
+        const r = await ipcRenderer.invoke('playlists:import', url).catch(() => null);
+        if (r && r.ok) {
+            collToast(`${r.updated ? 'updated' : 'imported'} "${r.name}" (${r.count} tracks)`);
+            setPlaylistsOpen(true);
+            void renderPlaylistDetail(r.id);
+        } else {
+            collToast('import failed: ' + ((r && r.error) || 'unknown error'));
+        }
+    });
+    mk('⟳ Reload collection', () => { closeMenu(); reloadCollection(false); });
+    mk('⟳ Full re-scan (slow)', () => { closeMenu(); reloadCollection(true); });
+    document.body.appendChild(menu);
+    menuEl = menu;
+    const r = $('more').getBoundingClientRect();
+    menu.style.left = Math.max(6, Math.min(r.right - 190, window.innerWidth - 196)) + 'px';
+    menu.style.top = Math.min(r.bottom + 6, window.innerHeight - 160) + 'px';
 });
 
 // drop items whose keys vanished (library removals, bandcamp-side hides)
@@ -1365,7 +1421,7 @@ function textPrompt(title: string, initial: string, multiline = false): Promise<
             (multiline
                 ? `<textarea spellcheck="false" maxlength="2000"></textarea>` +
                   `<div class="mrow" style="margin-top:10px"><span style="flex:1;font-size:11px;color:#848079;align-self:center">Ctrl+Enter to save</span>`
-                : `<input type="text" spellcheck="false" autocomplete="off" maxlength="100" style="width:100%">` +
+                : `<input type="text" spellcheck="false" autocomplete="off" maxlength="300" style="width:100%">` +
                   `<div class="mrow" style="margin-top:14px">`) +
             `<button class="m-ok primary">OK</button>` +
             `<button class="m-cancel">Cancel</button></div></div>`;

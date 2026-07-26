@@ -278,6 +278,37 @@ function injectReleaseDownload(): void {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectReleaseDownload);
 else injectReleaseDownload();
 
+// fan playlist pages get an import button (floating pill, page-shape agnostic):
+// main fetches the page's data blob and mirrors it into the app's playlists.
+// re-importing the same playlist updates it instead of duplicating.
+function injectPlaylistImport(): void {
+    try {
+        // real playlist paths are /<username>/playlist/<slug>
+        if (!/\/playlist\/[^/]+/.test(location.pathname)) return;
+        if (document.getElementById('bcrpc-plimport')) return;
+        const btn = document.createElement('button');
+        btn.id = 'bcrpc-plimport';
+        btn.type = 'button';
+        const idle = '♫ Add to app playlists';
+        btn.textContent = idle;
+        btn.title = "Import this playlist into the collection view's playlists";
+        btn.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147483000;padding:9px 16px;font-size:13px;cursor:pointer;border:1px solid #1da0c3;border-radius:999px;background:#181a1b;color:#1da0c3;font-family:inherit;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+        btn.addEventListener('click', async () => {
+            btn.textContent = '♫ importing…';
+            try {
+                const r: any = await ipcRenderer.invoke('playlists:import', location.href.split(/[?#]/)[0]);
+                btn.textContent = r && r.ok
+                    ? `♫ ${r.updated ? 'updated' : 'imported'} ✓ (${r.count} tracks)`
+                    : '♫ ' + ((r && r.error) || 'failed');
+            } catch { btn.textContent = '♫ failed'; }
+            setTimeout(() => { btn.textContent = idle; }, 2600);
+        });
+        document.body.appendChild(btn);
+    } catch { /* best effort */ }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectPlaylistImport);
+else injectPlaylistImport();
+
 // mouse back/forward -> main (debounced) so don't double w/ os app command
 window.addEventListener('mouseup', (e) => {
     if (e.button === 3) ipcRenderer.send('app:back');

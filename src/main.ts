@@ -141,7 +141,11 @@ type PlaylistEntryT = {
     id: string; title: string; artist: string; album: string; art: string;
     duration: number; url: string; bandId: string; tralbumId: string; tralbumType: TralbumType;
 };
-type PlaylistT = { id: string; name: string; createdAt: number; entries: PlaylistEntryT[]; desc?: string; cover?: string };
+type PlaylistT = {
+    id: string; name: string; createdAt: number; entries: PlaylistEntryT[]; desc?: string; cover?: string;
+    /** bandcamp playlist id when imported — re-imports update in place */
+    bcId?: number;
+};
 // local files library (quodlibet-style: files are parsed once into a queryable
 // index keyed by path — the on-disk folder layout is irrelevant afterwards)
 type LocalTrackT = {
@@ -1844,6 +1848,66 @@ async function init() {
             }
         })();
         return { ok: true, count: p.entries.length };
+    });
+
+    // import a fan playlist from bandcamp: paste a bandcamp.com/playlist/… url
+    // (collection toolbar ⋯ menu) or use the button injected on playlist pages.
+    // re-importing the same playlist UPDATES it in place (matched by its
+    // bandcamp id) instead of duplicating.
+    ipcMain.handle('playlists:import', async (_e, url: unknown) => {
+        const u = String(url || '').trim().split(/[?#]/)[0];
+        // real urls are bandcamp.com/<username>/playlist/<slug> (bare
+        // /playlist/<id> is accepted too)
+        if (!/^https:\/\/[^/]*bandcamp\.com\/(?:[^/]+\/)?playlist\/[^/]+/.test(u)) {
+            return { ok: false, error: 'that is not a bandcamp playlist url' };
+        }
+        const page = await bandcampApi.fetchBandcampPlaylist(u);
+        if (!page.ok) return { ok: false, error: page.error };
+        if (!page.tracks.length) return { ok: false, error: 'that playlist has no tracks' };
+        const entries: PlaylistEntryT[] = page.tracks.map((t) => ({
+            id: t.id, title: t.title, artist: t.artist, album: t.album,
+            art: t.artId ? `https://f4.bcbits.com/img/a${t.artId}_9.jpg` : '',
+            duration: t.duration, url: t.url, bandId: t.bandId,
+            // tracks ride inside their parent album when it's known (same rule
+            // as adding from the collection) so metadata resolves correctly
+            tralbumId: t.albumId || t.id, tralbumType: (t.albumId ? 'a' : 't') as TralbumType,
+        }));
+        const all = playlistsDisk.get();
+        let p = page.playlistId ? all.find((x) => x.bcId === page.playlistId) : undefined;
+        const created = !p;
+        if (!p) {
+            p = {
+                id: 'pl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+                name: page.title, createdAt: Date.now(), entries: [],
+            };
+            all.push(p);
+        }
+        p.bcId = page.playlistId || undefined;
+        p.name = page.title;
+        if (page.description) p.desc = page.description.slice(0, 2000);
+        p.entries = entries;
+        playlistsDisk.save();
+        // playlist cover: bandcamp serves image ids both with and without the
+        // art prefix depending on kind — try both, first hit wins
+        if (page.imageId && !p.cover) {
+            for (const iu of [`https://f4.bcbits.com/img/a${page.imageId}_10.jpg`, `https://f4.bcbits.com/img/${page.imageId}_10.jpg`]) {
+                try {
+                    const buf = await bandcampApi.fetchBinary(iu);
+                    if (!buf || buf.length < 100) continue;
+                    const img = nativeImage.createFromBuffer(buf);
+                    if (img.isEmpty()) continue;
+                    const coversDir = path.join(app.getPath('userData'), 'playlist-covers');
+                    fs.mkdirSync(coversDir, { recursive: true });
+                    const file = path.join(coversDir, p.id + '.png');
+                    fs.writeFileSync(file, img.toPNG());
+                    p.cover = file;
+                    playlistsDisk.save();
+                    break;
+                } catch { /* try the other form */ }
+            }
+        }
+        if (devMode) console.log(`[bcrpc] playlists:import ${created ? 'created' : 'updated'} "${p.name}" n=${entries.length}`);
+        return { ok: true, id: p.id, name: p.name, count: entries.length, updated: !created };
     });
 
     // --- local files library ----------------------------------------------------

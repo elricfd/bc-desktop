@@ -257,6 +257,16 @@
         .pl-row.dragging { opacity: .4; }
         /* "add to playlist" picker header (menu itself reuses .dlmenu) */
         .plm-title { padding: 4px 9px 6px; font-size: 11px; color: var(--sub); }
+        /* transient feedback toast (imports, reloads) */
+        .ctoast {
+            position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(8px);
+            z-index: 120; background: #202325; border: 1px solid var(--line); border-radius: 8px;
+            color: var(--text); font-size: 12px; padding: 9px 16px; pointer-events: none;
+            opacity: 0; transition: opacity .18s ease, transform .18s ease;
+            box-shadow: 0 8px 24px rgba(0,0,0,.4); max-width: 70vw;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .ctoast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
         /* custom playlist cover (detail header + browser cards reuse .pl-cover) */
         .pl-cover.clickable { cursor: pointer; }
         .pl-cover.clickable:hover { outline: 2px solid var(--accent); }
@@ -312,8 +322,7 @@
         <button class="tbtn" id="dir" title="Toggle direction">↓</button>
         <button class="tbtn" id="viewmode" title="Switch to track list view">≡</button>
         <button class="tbtn" id="plbtn" title="Your playlists">Playlists</button>
-        <button class="tbtn" id="addlocal" title="Add audio files from your computer to the collection">+ Files</button>
-        <button class="tbtn" id="refresh" title="Reload">Reload</button>
+        <button class="tbtn" id="more" title="More — add local files, import playlists, reload">⋯</button>
         <button class="tbtn" id="close" title="Close">Close</button>
     </div>
     <div class="grid" id="grid"><div class="state" id="state">Open your collection to load it…</div></div>
