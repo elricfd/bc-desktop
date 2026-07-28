@@ -9,7 +9,7 @@ import { autoUpdater } from 'electron-updater';
 
 import { PresenceService } from './services/presenceService';
 import { LastfmService } from './services/lastfmService';
-import { BandcampApi } from './services/bandcampApi';
+import { BandcampApi, parseBandcampPlaylistBlob } from './services/bandcampApi';
 import { buildExtractorScript } from './services/queueExtractor';
 import { buildId3v23 } from './services/id3';
 import { readLocalTags, AUDIO_EXTENSIONS } from './services/localTags';
@@ -813,23 +813,46 @@ async function init() {
         callback({ cancel: false });
     });
 
-    // fan playlist header play button: bandcamp toggles its own (muted, hidden)
-    // player without requesting a stream, so the audio trap never fires and the
-    // button appears dead. the preload detects the click & we run the extractor
-    // directly — #PlaylistPage embeds the full tracklist with stream urls.
-    ipcMain.on('app:playlist-play', () => {
+    // fan playlist page play buttons: the preload intercepts them completely
+    // (bandcamp's own player preloads track 1 WITHOUT a stream request, so the
+    // audio trap could never see header/first-row clicks, and its metadata
+    // fallback painted the page <title> into the player). we read the page's
+    // data-blob — the same shape the playlist importer parses — and queue it
+    // with resolver handles; streams resolve lazily like imported playlists.
+    ipcMain.on('app:playlist-play', (_e, index?: unknown) => {
         if (!contentView || contentView.webContents.isDestroyed()) return;
         const seq = ++trapSeq;
-        // no trapped stream url: fromPlaylistPage plays the embedded queue from track 1
-        contentView.webContents.executeJavaScript(buildExtractorScript('about:playlist', 'raw'))
-            .then((data: any) => {
-                if (seq !== trapSeq) return;
-                if (devMode) console.log('[bcrpc] playlist-play ' + (data?.queue ? 'n=' + data.queue.length : 'EMPTY'));
-                if (data?.queue?.length && playerView && !playerView.webContents.isDestroyed()) {
-                    playerView.webContents.send('player:stream-incoming', data);
+        const wanted = Math.max(0, Math.floor(Number(index) || 0));
+        contentView.webContents.executeJavaScript(
+            `(function(){var el=document.getElementById('PlaylistPage')||document.querySelector('[data-blob]');return el?(el.getAttribute('data-blob')||''):'';})()`
+        ).then((raw: any) => {
+            if (seq !== trapSeq) return;
+            const page = parseBandcampPlaylistBlob(String(raw || ''));
+            if (page.ok && page.tracks.length) {
+                const queue: PlayerTrack[] = page.tracks.map((t) => ({
+                    id: t.id, title: t.title, artist: t.artist, album: t.album,
+                    art: t.artId ? `https://f4.bcbits.com/img/a${t.artId}_9.jpg` : '',
+                    src: '', duration: t.duration, url: t.url,
+                    bandId: t.bandId, tralbumId: t.albumId || t.id, tralbumType: (t.albumId ? 'a' : 't') as TralbumType,
+                }));
+                const active = Math.min(wanted, queue.length - 1);
+                if (devMode) console.log('[bcrpc] playlist-play blob n=' + queue.length + ' active=' + active);
+                if (playerView && !playerView.webContents.isDestroyed()) {
+                    playerView.webContents.send('player:stream-incoming', { queue, activeIndex: active, context: 'playlist', format: 'raw' });
                 }
-            })
-            .catch((err: any) => { if (devMode) console.log('[bcrpc] playlist-play ERROR ' + (err && (err.message || err))); });
+                return;
+            }
+            // old page shape: the legacy extractor still recognizes it
+            contentView.webContents.executeJavaScript(buildExtractorScript('about:playlist', 'raw'))
+                .then((data: any) => {
+                    if (seq !== trapSeq) return;
+                    if (devMode) console.log('[bcrpc] playlist-play legacy ' + (data?.queue ? 'n=' + data.queue.length : 'EMPTY'));
+                    if (data?.queue?.length && playerView && !playerView.webContents.isDestroyed()) {
+                        playerView.webContents.send('player:stream-incoming', data);
+                    }
+                })
+                .catch(() => { /* nothing to play */ });
+        }).catch((err: any) => { if (devMode) console.log('[bcrpc] playlist-play ERROR ' + (err && (err.message || err))); });
     });
 
     session.webRequest.onHeadersReceived((details, callback) => {

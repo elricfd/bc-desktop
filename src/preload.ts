@@ -178,19 +178,23 @@ document.addEventListener('keydown', (e) => {
     try { ipcRenderer.send('player:hotkey', cmd); } catch (err) { /* bridge gone */ }
 }, true);
 
-// the big play button on a fan playlist page toggles bandcamp's own (muted,
-// hidden) player without firing a stream request, so the audio trap never sees
-// it & nothing plays. drive the extractor directly: the #PlaylistPage blob has
-// the whole tracklist with stream urls, so main can queue it straight away.
+// fan playlist page play buttons — header AND rows — are intercepted entirely.
+// bandcamp's player preloads track 1 without a stream request, so the audio
+// trap never saw header/first-row clicks (they looked dead) and its metadata
+// fallback painted the page <title> into the player. every playlist button
+// carries tracklistkey="playlist:<id>"; row buttons also carry trackindex.
+// we suppress the native player (no double audio) and let main queue the
+// page's data-blob directly at the clicked index.
 document.addEventListener('click', (e) => {
     if (e.button !== 0) return;
+    if (!/\/playlist\//.test(location.pathname)) return;
     const t = e.target as HTMLElement;
-    // header-level button only: it sits in .play-pause-container and carries
-    // tracklistkey="playlist:<id>". per-track buttons (.play-target in .over-art)
-    // stream normally & get trapped, so they don't need this.
-    const btn = t && t.closest ? t.closest('.play-pause-container .play-pause-button[tracklistkey^="playlist"], .play-pause-container .play-pause-button') : null;
-    if (!btn || !document.getElementById('PlaylistPage')) return;
-    ipcRenderer.send('app:playlist-play');
+    const btn = t && t.closest ? t.closest('.play-pause-button[tracklistkey^="playlist"]') as HTMLElement | null : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation(); // capture phase: bandcamp's own handlers never run
+    const idx = parseInt(btn.getAttribute('trackindex') || '0', 10) || 0;
+    ipcRenderer.send('app:playlist-play', idx);
 }, true);
 
 // mirror OUR playback onto the release page's inline player (play state,

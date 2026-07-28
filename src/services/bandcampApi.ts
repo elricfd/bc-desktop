@@ -961,14 +961,17 @@ export function playlistPageError(error: string): BandcampPlaylistPage {
 export function parseBandcampPlaylistHtml(html: string): BandcampPlaylistPage {
     const m = String(html || '').match(/data-blob="([^"]+)"/);
     if (!m) return playlistPageError('no page data found (is that a playlist url?)');
-    let blob: any = null;
     // attribute unescape: &amp; strictly LAST or "&amp;quot;" double-unescapes
-    try {
-        blob = JSON.parse(m[1]
-            .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-            .replace(/&amp;/g, '&'));
-    } catch { return playlistPageError('unreadable page data'); }
+    return parseBandcampPlaylistBlob(m[1]
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&'));
+}
+
+/** parse an already-decoded data-blob json string (e.g. read via getAttribute in-page). */
+export function parseBandcampPlaylistBlob(raw: string): BandcampPlaylistPage {
+    let blob: any = null;
+    try { blob = JSON.parse(String(raw || '')); } catch { return playlistPageError('unreadable page data'); }
     const appData = blob?.appData;
     const rows: any[] = appData?.tracklist?.tracks;
     if (!appData || !Array.isArray(rows)) return playlistPageError('not a bandcamp playlist page');
