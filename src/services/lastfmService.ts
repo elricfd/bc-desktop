@@ -17,6 +17,17 @@ interface LastfmConfig {
     sessionKey: string;
     username: string;
     enabled: boolean;
+    minScrobbleLen: number;
+}
+
+/**
+ * last.fm scrobble threshold: a track is eligible once it's longer than
+ * minLen; it then scrobbles at half its duration or 4 minutes, whichever
+ * comes first. returns null when the track should never scrobble.
+ */
+export function scrobbleThreshold(duration: number, minLen: number): number | null {
+    if (duration <= minLen) return null;
+    return Math.min(duration / 2, 240);
 }
 
 export class LastfmService {
@@ -30,12 +41,17 @@ export class LastfmService {
 
     private cfg(): LastfmConfig {
         const raw = (this.store.get('lastfm') as Partial<LastfmConfig>) || {};
+        const m = Number(raw.minScrobbleLen);
         return {
             apiKey: raw.apiKey || '',
             apiSecret: raw.apiSecret || '',
             sessionKey: raw.sessionKey || '',
             username: raw.username || '',
             enabled: raw.enabled !== false,
+            minScrobbleLen:
+                raw.minScrobbleLen === undefined || !Number.isFinite(m)
+                    ? 30
+                    : Math.max(0, Math.min(30, Math.round(m))),
         };
     }
 
@@ -176,9 +192,9 @@ export class LastfmService {
         }
         this.lastPos = track.position;
         if (this.scrobbled) return;
-        // last.fm rule: half track or 4 mins whichever comes first.
-        const threshold = track.duration > 30 ? Math.min(track.duration / 2, 240) : 0;
-        if (!threshold || track.position < threshold) return;
+        const minLen = this.cfg().minScrobbleLen;
+        const threshold = scrobbleThreshold(track.duration, minLen);
+        if (threshold === null || track.position < threshold) return;
         this.scrobbled = true;
 
         const c = this.cfg();
