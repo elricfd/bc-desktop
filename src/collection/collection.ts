@@ -974,14 +974,17 @@ ipcRenderer.on('collection:years', (_e, updates: { tralbumId: string; year: numb
 
 searchEl.addEventListener('input', forceRender);
 sortEl.addEventListener('change', () => { if (sortEl.value === 'year') requestYears(); forceRender(); });
-scopeEl.addEventListener('change', forceRender);
+scopeEl.addEventListener('change', () => {
+    if (scopeEl.value === 'playlists') { setPlaylistsOpen(true); return; }
+    plPrevScope = scopeEl.value;
+    if (plOpen) setPlaylistsOpen(false);
+    forceRender();
+});
 dirBtn.addEventListener('click', () => {
     descending = !descending;
     dirBtn.textContent = descending ? '↓' : '↑';
     forceRender();
 });
-$('close').addEventListener('click', () => ipcRenderer.send('collection:close'));
-
 function reloadCollection(full: boolean): void {
     fullRescan = full;
     items = [];
@@ -1094,23 +1097,35 @@ ipcRenderer.on('collection:shown', () => { if (!items.length) load(); });
 // added from anywhere in the collection: right-click a cover or song, the
 // "+ Playlist" button in the tracklist panel, or the list view's row menu.
 const plov = $('plov');
-const plBtn = $('plbtn');
 let plOpen = false;
 let plDetailId = ''; // '' = browser (all playlists)
 let plDragFrom: number | null = null;
+let plPrevScope = 'all'; // scope to restore when leaving the playlists view
 
 interface PlSummary { id: string; name: string; count: number; duration: number; arts: string[]; desc: string; cover: string }
 interface PlEntry { id: string; title: string; artist: string; album: string; art: string; duration: number }
 interface PlAddReq { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }
 
+// the playlists view lives under the scope dropdown ("Playlists" option); the
+// grid keeps rendering hidden underneath. leaving restores the previous scope.
 function setPlaylistsOpen(open: boolean): void {
     plOpen = open;
     plov.style.display = open ? '' : 'none';
     grid.style.display = open ? 'none' : '';
-    plBtn.classList.toggle('on', open);
-    if (open) void refreshPlaylists();
+    // search/sort/direction/viewmode act on the grid, not playlists — hide them
+    searchEl.style.display = open ? 'none' : '';
+    viewBtn.style.display = open ? 'none' : '';
+    sortEl.style.display = open || viewMode === 'list' ? 'none' : '';
+    dirBtn.style.display = open || viewMode === 'list' ? 'none' : '';
+    if (open) {
+        if (scopeEl.value !== 'playlists') scopeEl.value = 'playlists';
+        void refreshPlaylists();
+    } else if (scopeEl.value === 'playlists') {
+        scopeEl.value = plPrevScope;
+        forceRender();
+    }
+    updateHeaderCount();
 }
-plBtn.addEventListener('click', () => setPlaylistsOpen(!plOpen));
 
 async function refreshPlaylists(): Promise<void> {
     if (!plOpen) return;
