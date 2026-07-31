@@ -27,6 +27,12 @@ function escapeHtml(s: string): string {
     return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 }
 
+// the sorting arrow (down); ascending is the same asset flipped via css .asc
+function sortArrowSvg(asc: boolean): string {
+    return `<svg${asc ? ' class="asc"' : ''} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">` +
+        `<path d="M13.1314 15.6468L18.4 10.3515L20 11.9596L12 20L4 11.9596L5.6 10.3515L10.8686 15.6468L10.8686 4H13.1314V15.6468Z" fill="currentColor"/></svg>`;
+}
+
 async function load(): Promise<void> {
     if (loading || items.length) return;
     loading = true;
@@ -564,7 +570,8 @@ function renderList(list: CollectionItem[]): void {
         const sp = document.createElement('span');
         const active = listSort.key === c.key;
         sp.className = (c.cls + (active ? ' on' : '')).trim();
-        sp.textContent = c.label + (active ? (listSort.desc ? ' ↓' : ' ↑') : '');
+        // active column shows the arrow svg (flipped via .asc when ascending)
+        sp.innerHTML = escapeHtml(c.label) + (active ? sortArrowSvg(!listSort.desc) : '');
         sp.title = 'Sort by ' + c.label;
         sp.addEventListener('click', () => {
             if (c.key === 'year') requestYears(); // fill missing years like the dropdown did
@@ -982,7 +989,8 @@ scopeEl.addEventListener('change', () => {
 });
 dirBtn.addEventListener('click', () => {
     descending = !descending;
-    dirBtn.textContent = descending ? '↓' : '↑';
+    // the button holds the arrow svg; ascending just flips it (css .asc)
+    dirBtn.classList.toggle('asc', !descending);
     forceRender();
 });
 function reloadCollection(full: boolean): void {

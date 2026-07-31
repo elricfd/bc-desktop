@@ -39,6 +39,13 @@
             border-radius: 6px; padding: 7px 10px; font-size: 12px; cursor: pointer;
         }
         .tbtn:hover { border-color: var(--accent); }
+        /* sort direction: down arrow svg; ascending just flips it */
+        .tbtn.dirbtn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 8px; }
+        .tbtn.dirbtn svg { width: 15px; height: 15px; display: block; transition: transform .12s ease; }
+        .tbtn.dirbtn.asc svg { transform: scaleY(-1); }
+        /* same arrow, smaller, as the list view's column sort indicator */
+        .lv-head svg { width: 10px; height: 10px; vertical-align: -1px; margin-left: 3px; }
+        .lv-head svg.asc { transform: scaleY(-1); }
         .grid {
             /* positioned so children's offsetTop is grid-relative (the list
                view's virtual scroller does exact offset math against it) */
@@ -320,7 +327,9 @@
             <option value="title">Album / title</option>
             <option value="year">Year</option>
         </select>
-        <button class="tbtn" id="dir" title="Toggle direction">↓</button>
+        <button class="tbtn dirbtn" id="dir" title="Toggle direction">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13.1314 15.6468L18.4 10.3515L20 11.9596L12 20L4 11.9596L5.6 10.3515L10.8686 15.6468L10.8686 4H13.1314V15.6468Z" fill="currentColor"/></svg>
+        </button>
         <button class="tbtn" id="viewmode" title="Switch to track list view">≡</button>
         <button class="tbtn" id="more" title="More — add local files, import playlists, reload">⋯</button>
     </div>
