@@ -292,7 +292,6 @@ $('f-nr').addEventListener('click', () => setFilter('nr'));
 $('f-df').addEventListener('click', () => setFilter('df'));
 
 $('refresh').addEventListener('click', () => fetchPage(true));
-$('close').addEventListener('click', () => ipcRenderer.send('feed:close'));
 
 ipcRenderer.on('feed:shown', () => { if (!stories.length && !fetching) fetchPage(true); });
 ipcRenderer.on('feed:load', () => { if (!stories.length && !fetching) fetchPage(true); });
