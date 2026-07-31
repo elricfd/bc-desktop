@@ -327,7 +327,7 @@
             $('apiKey').value = lfm.apiKey || '';
             $('apiSecret').value = lfm.apiSecret || '';
             $('lfmEnabled').checked = lfm.enabled !== false;
-            $('minScrobbleLen').value = lfm.minScrobbleLen === undefined ? 30 : lfm.minScrobbleLen;
+            $('minScrobbleLen').value = lfm.minScrobbleLen == null ? 30 : lfm.minScrobbleLen;
             $('discordEnabled').checked = s.discordEnabled !== false;
             $('discordClientId').value = s.discordClientId || '';
             const dOpts = s.discordOpts || {};

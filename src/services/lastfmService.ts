@@ -49,7 +49,9 @@ export class LastfmService {
             username: raw.username || '',
             enabled: raw.enabled !== false,
             minScrobbleLen:
-                raw.minScrobbleLen === undefined || !Number.isFinite(m)
+                raw.minScrobbleLen === undefined ||
+                raw.minScrobbleLen === null ||
+                !Number.isFinite(m)
                     ? 30
                     : Math.max(0, Math.min(30, Math.round(m))),
         };
