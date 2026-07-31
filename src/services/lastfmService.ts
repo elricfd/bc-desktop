@@ -23,6 +23,8 @@ export class LastfmService {
     private pendingToken = '';
     private lastNowPlaying = '';
     private scrobbled = false;
+    /** last observed playback position; detects loop restarts (repeat-one) */
+    private lastPos = 0;
 
     constructor(private readonly store: Store) {}
 
@@ -139,6 +141,7 @@ export class LastfmService {
         if (key === this.lastNowPlaying) return;
         this.lastNowPlaying = key;
         this.scrobbled = false;
+        this.lastPos = 0;
 
         const c = this.cfg();
         try {
@@ -161,7 +164,18 @@ export class LastfmService {
 
     /** called on progress; submits scrobble once play threshold is met. */
     async maybeScrobble(track: NowPlaying): Promise<void> {
-        if (!this.isReady() || this.scrobbled || !track.title || !track.artist) return;
+        if (!this.isReady() || !track.title || !track.artist) return;
+        // repeat-one: the SAME track restarting is a NEW play — last.fm counts
+        // every loop, but the scrobbled flag only reset on track CHANGE, so
+        // loops after the first never scrobbled. a jump back to the start after
+        // real listening re-arms the scrobble and re-announces now playing.
+        // (small back-seeks don't re-arm: they don't land near 0.)
+        if (this.scrobbled && track.position < 5 && this.lastPos > Math.max(30, track.position + 30)) {
+            this.scrobbled = false;
+            this.lastNowPlaying = '';
+        }
+        this.lastPos = track.position;
+        if (this.scrobbled) return;
         // last.fm rule: half track or 4 mins whichever comes first.
         const threshold = track.duration > 30 ? Math.min(track.duration / 2, 240) : 0;
         if (!threshold || track.position < threshold) return;
