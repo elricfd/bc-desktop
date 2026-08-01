@@ -36,7 +36,7 @@
         .section { border: 1px solid #2a2e30; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
         .section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #9a968e; margin-bottom: 12px; }
         label { display: block; font-size: 11px; color: #fff; margin: 10px 0 4px; }
-        input[type="text"], input[type="password"] {
+        input[type="text"], input[type="password"], input[type="number"] {
             width: 100%; background: #121415; border: 1px solid #2a2e30; border-radius: 5px;
             color: #e8e6e3; padding: 8px 10px; font-size: 12px;
         }
@@ -83,6 +83,11 @@
         <div class="row" style="margin-top:12px;">
             <label class="toggle" style="margin:0;"><input type="checkbox" id="lfmEnabled"> Enable scrobbling</label>
             <span id="lfmUser" class="status"></span>
+        </div>
+        <label style="margin-top:12px;">Minimum track length to scrobble (seconds)</label>
+        <div class="row" style="gap:8px;margin-top:2px;">
+            <input type="number" id="minScrobbleLen" min="0" max="30" step="1" style="width:90px;" autocomplete="off">
+            <span class="hint" style="flex:1;margin:0;">tracks shorter than this are never scrobbled; 0 scrobbles everything at half its length. last.fm may ignore very short scrobbles.</span>
         </div>
         <div class="row">
             <button id="btnConnect">Connect account</button>
@@ -322,6 +327,7 @@
             $('apiKey').value = lfm.apiKey || '';
             $('apiSecret').value = lfm.apiSecret || '';
             $('lfmEnabled').checked = lfm.enabled !== false;
+            $('minScrobbleLen').value = lfm.minScrobbleLen == null ? 30 : lfm.minScrobbleLen;
             $('discordEnabled').checked = s.discordEnabled !== false;
             $('discordClientId').value = s.discordClientId || '';
             const dOpts = s.discordOpts || {};
@@ -377,7 +383,13 @@
         async function persist() {
             if (!ipcRenderer) return { ok: false, error: 'no bridge' };
             return ipcRenderer.invoke('settings:save', {
-                lastfm: { apiKey: $('apiKey').value.trim(), apiSecret: $('apiSecret').value.trim(), enabled: $('lfmEnabled').checked },
+                lastfm: { apiKey: $('apiKey').value.trim(), apiSecret: $('apiSecret').value.trim(), enabled: $('lfmEnabled').checked,
+                    minScrobbleLen: (() => {
+                        const raw = $('minScrobbleLen').value.trim();
+                        const v = raw === '' ? 30 : Number(raw);
+                        return Number.isFinite(v) ? Math.min(Math.max(Math.round(v), 0), 30) : 30;
+                    })()
+                },
                 discordEnabled: $('discordEnabled').checked,
                 discordClientId: $('discordClientId').value.trim(),
                 discordOpts: { showWhenPaused: $('dOptPaused').checked },
