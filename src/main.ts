@@ -2663,6 +2663,7 @@ async function init() {
         if (devMode) console.log('[bcrpc] settings:get');
         return {
             lastfm: store.get('lastfm', { apiKey: '', apiSecret: '', username: '', enabled: true }),
+            lastfmStatus: lastfmService.status(),
             discordEnabled: store.get('discordEnabled', true),
             discordClientId: store.get('discordClientId', ''),
             closeToTray: store.get('closeToTray', true),

@@ -264,16 +264,16 @@ function injectReleaseDownload(): void {
             const btn = document.createElement('button');
             btn.id = 'bcrpc-dlbtn';
             btn.type = 'button';
-            btn.textContent = owned ? '⤓ Download (you own this)' : '⤓ Download mp3-128';
+            btn.textContent = owned ? 'Download (you own this)' : 'Download mp3-128';
             btn.title = owned ? 'Open your download page (all formats)' : "Download this release's streams with tags & cover art";
             btn.style.cssText = 'display:inline-block;margin:10px 0;padding:7px 14px;font-size:13px;cursor:pointer;border:1px solid #1da0c3;border-radius:6px;background:rgba(29,160,195,.12);color:#1da0c3;font-family:inherit;';
             btn.addEventListener('click', async () => {
                 if (owned) { location.href = res.downloadUrl; return; }
-                btn.textContent = '⤓ starting…';
+                btn.textContent = 'starting…';
                 try {
                     const r = await ipcRenderer.invoke('download:release', { url: location.href.split(/[?#]/)[0] });
-                    btn.textContent = r && r.ok ? '⤓ downloading - see the downloads panel' : '⤓ ' + ((r && r.error) || 'failed');
-                } catch { btn.textContent = '⤓ failed'; }
+                    btn.textContent = r && r.ok ? 'downloading - see the downloads panel' : ((r && r.error) || 'failed');
+                } catch { btn.textContent = 'failed'; }
             });
             anchor.parentElement!.insertBefore(btn, anchor.nextSibling);
         }).catch(() => { /* no button */ });

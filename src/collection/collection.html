@@ -39,10 +39,16 @@
             border-radius: 6px; padding: 7px 10px; font-size: 12px; cursor: pointer;
         }
         .tbtn:hover { border-color: var(--accent); }
-        /* sort direction: down arrow svg; ascending just flips it */
-        .tbtn.dirbtn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 8px; }
-        .tbtn.dirbtn svg { width: 15px; height: 15px; display: block; transition: transform .12s ease; }
+        /* icon-only toolbar buttons (dir arrow, view mode, more) */
+        .tbtn.dirbtn, .tbtn.iconbtn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 8px; }
+        .tbtn.dirbtn svg, .tbtn.iconbtn svg { width: 15px; height: 15px; display: block; transition: transform .12s ease; }
         .tbtn.dirbtn.asc svg { transform: scaleY(-1); }
+        /* svg icons inside the round overlay buttons + badges */
+        .enq, .dl, .tlq, .pl-x { display: inline-flex; align-items: center; justify-content: center; }
+        .enq svg, .dl svg { width: 15px; height: 15px; }
+        .tlq svg, .pl-x svg { width: 12px; height: 12px; }
+        .wishb svg { width: 13px; height: 13px; display: block; }
+        .pl-new .big svg { width: 26px; height: 26px; display: block; }
         /* same arrow, smaller, as the list view's column sort indicator */
         .lv-head svg { width: 10px; height: 10px; vertical-align: -1px; margin-left: 3px; }
         .lv-head svg.asc { transform: scaleY(-1); }
@@ -328,10 +334,10 @@
             <option value="year">Year</option>
         </select>
         <button class="tbtn dirbtn" id="dir" title="Toggle direction">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13.1314 15.6468L18.4 10.3515L20 11.9596L12 20L4 11.9596L5.6 10.3515L10.8686 15.6468L10.8686 4H13.1314V15.6468Z" fill="currentColor"/></svg>
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 5V19M12 19L6 13M12 19L18 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <button class="tbtn" id="viewmode" title="Switch to track list view">≡</button>
-        <button class="tbtn" id="more" title="More - add local files, import playlists, reload">⋯</button>
+        <button class="tbtn iconbtn" id="viewmode" title="Switch to track list view"><svg viewBox="0 0 24 24" fill="none"><path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        <button class="tbtn iconbtn" id="more" title="More - add local files, import playlists, reload"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></button>
     </div>
     <div class="grid" id="grid"><div class="state" id="state">Open your collection to load it…</div></div>
     <div class="plov" id="plov" style="display: none"></div>

@@ -59,7 +59,7 @@
     <div class="bar">
         <h1>Downloads</h1>
         <button id="clear" title="Remove finished downloads from the list">Clear</button>
-        <button id="close">✕</button>
+        <button id="close" style="display:inline-flex;align-items:center;"><svg viewBox="0 0 24 24" fill="none" style="width:12px;height:12px;display:block"><path d="M6 6L18 18M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     </div>
     <div class="list" id="list"><div class="state">no downloads yet</div></div>
     
@@ -82,7 +82,7 @@
                 row.className = 'row' + (d.state === 'completed' && d.file ? ' openable' : '');
                 const pct = Math.max(0, Math.min(100, d.percent || 0));
                 
-                const cancelBtn = d.state === 'progressing' ? `<button class="cancel-btn" data-id="${d.id}" title="Stop Download">✕</button>` : '';
+                const cancelBtn = d.state === 'progressing' ? `<button class="cancel-btn" data-id="${d.id}" title="Stop Download"><svg viewBox="0 0 24 24" fill="none" style="width:11px;height:11px;display:block"><path d="M6 6L18 18M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : '';
 
                 row.innerHTML =
                     '<div class="name">' + esc(d.name) + '</div>' +

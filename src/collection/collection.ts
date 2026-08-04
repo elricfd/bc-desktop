@@ -27,10 +27,21 @@ function escapeHtml(s: string): string {
     return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 }
 
-// the sorting arrow (down); ascending is the same asset flipped via css .asc
+// icons: Dazzle Line Icons (dazzleui.pro via svgrepo, CC BY 4.0) - 24px line
+// set, stroke-2 round caps, currentColor. arrows flip via css .asc.
+const LINE = 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+const ICONS = {
+    arrowDown: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 5V19M12 19L6 13M12 19L18 13" ${LINE}/></svg>`,
+    plus: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 6V18M6 12H18" ${LINE}/></svg>`,
+    x: `<svg viewBox="0 0 24 24" fill="none"><path d="M6 6L18 18M18 6L6 18" ${LINE}/></svg>`,
+    download: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 4V15M12 15L7 10M12 15L17 10M5 20H19" ${LINE}/></svg>`,
+    heart: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 20C12 20 3.5 15.36 3.5 9.75C3.5 7.13 5.6 5 8.25 5C9.92 5 11.25 5.9 12 7C12.75 5.9 14.08 5 15.75 5C18.4 5 20.5 7.13 20.5 9.75C20.5 15.36 12 20 12 20Z" ${LINE}/></svg>`,
+    grid: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1"/></svg>`,
+    list: `<svg viewBox="0 0 24 24" fill="none"><path d="M4 6H20M4 12H20M4 18H20" ${LINE}/></svg>`,
+    dots: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>`,
+};
 function sortArrowSvg(asc: boolean): string {
-    return `<svg${asc ? ' class="asc"' : ''} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">` +
-        `<path d="M13.1314 15.6468L18.4 10.3515L20 11.9596L12 20L4 11.9596L5.6 10.3515L10.8686 15.6468L10.8686 4H13.1314V15.6468Z" fill="currentColor"/></svg>`;
+    return asc ? ICONS.arrowDown.replace('<svg', '<svg class="asc"') : ICONS.arrowDown;
 }
 
 async function load(): Promise<void> {
@@ -204,13 +215,12 @@ function createCard(it: CollectionItem): HTMLElement {
     const enq = document.createElement('button');
     enq.className = 'enq';
     enq.title = 'add to queue';
-    enq.textContent = '+';
+    enq.innerHTML = ICONS.plus;
     enq.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const prev = enq.textContent;
         const res = await ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
         enq.textContent = res && res.ok ? '✓' : '×';
-        setTimeout(() => { enq.textContent = prev; }, 900);
+        setTimeout(() => { enq.innerHTML = ICONS.plus; }, 900);
     });
     wrap.appendChild(enq);
     
@@ -218,7 +228,7 @@ function createCard(it: CollectionItem): HTMLElement {
         const b = document.createElement('span');
         b.className = 'wishb';
         b.title = 'on your wishlist';
-        b.textContent = '♡';
+        b.innerHTML = ICONS.heart;
         wrap.appendChild(b);
     }
     if (it.local) {
@@ -232,7 +242,7 @@ function createCard(it: CollectionItem): HTMLElement {
         const dl = document.createElement('button');
         dl.className = 'dl';
         dl.title = 'download';
-        dl.textContent = '⤓';
+        dl.innerHTML = ICONS.download;
         dl.addEventListener('click', (e) => { e.stopPropagation(); openDownloadMenu(it, dl); });
         wrap.appendChild(dl);
     } else if (it.wish) {
@@ -240,13 +250,13 @@ function createCard(it: CollectionItem): HTMLElement {
         const dl = document.createElement('button');
         dl.className = 'dl';
         dl.title = 'download streams (mp3-128, tagged)';
-        dl.textContent = '⤓';
+        dl.innerHTML = ICONS.download;
         dl.addEventListener('click', async (e) => {
             e.stopPropagation();
             dl.textContent = '…';
             const r = await ipcRenderer.invoke('download:release', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, url: it.url });
             dl.textContent = r && r.ok ? '✓' : '×';
-            setTimeout(() => { dl.textContent = '⤓'; }, 1200);
+            setTimeout(() => { dl.innerHTML = ICONS.download; }, 1200);
         });
         wrap.appendChild(dl);
     }
@@ -285,7 +295,7 @@ function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
     };
     // the picker replaces this menu itself - no closeMenu() here (it would
     // tear down the picker it just opened)
-    mk('+ Add to playlist…', () => openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY));
+    mk('Add to playlist…', () => openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY));
     mk('Remove from library', async () => {
         closeMenu();
         await ipcRenderer.invoke('library:remove', it.tralbumId);
@@ -605,7 +615,7 @@ const viewBtn = $('viewmode');
 function setViewMode(mode: 'grid' | 'list'): void {
     viewMode = mode;
     grid.classList.toggle('listmode', viewMode === 'list');
-    viewBtn.textContent = viewMode === 'list' ? '⊞' : '≡';
+    viewBtn.innerHTML = viewMode === 'list' ? ICONS.grid : ICONS.list;
     viewBtn.title = viewMode === 'list' ? 'Switch to album grid view' : 'Switch to track list view';
     // list view sorts via its column headers; the dropdown/direction are grid-only
     sortEl.style.display = viewMode === 'list' ? 'none' : '';
@@ -661,21 +671,21 @@ function openRowMenu(e: MouseEvent, r: ListRow): void {
         b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); closeMenu(); });
         menu.appendChild(b);
     };
-    add('▶ Play', () => play(it, r.trackIdx));
-    add(r.isAlbumRow ? '+ Add release to queue' : '+ Add track to queue', async () => {
+    add('Play', () => play(it, r.trackIdx));
+    add(r.isAlbumRow ? 'Add release to queue' : 'Add track to queue', async () => {
         await ipcRenderer.invoke('collection:enqueue', {
             tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId,
             trackIndex: r.isAlbumRow ? undefined : r.trackIdx,
         });
     });
-    if (!r.isAlbumRow) add('+ Add whole release to queue', async () => {
+    if (!r.isAlbumRow) add('Add whole release to queue', async () => {
         await ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
     });
     // NOT via add(): add() closes the menu after the callback, which would tear
     // down the picker the callback just opened (the picker replaces this menu)
     const plb = document.createElement('button');
     plb.className = 'dlfmt';
-    plb.textContent = '+ Add to playlist…';
+    plb.textContent = 'Add to playlist…';
     plb.addEventListener('click', (ev) => {
         ev.stopPropagation();
         openPlaylistPicker({
@@ -752,8 +762,8 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
         `<div class="tlartist">${escapeHtml(it.artist)}</div>` +
         `<div class="tlyear">${it.year || ''}</div>` +
         `<div class="tltags"></div>` +
-        `<div class="tlbtns"><button class="tlplayall">▶ Play all</button>` +
-        `<button class="tlqueue">+ Queue</button><button class="tlpl">+ Playlist</button>` +
+        `<div class="tlbtns"><button class="tlplayall">Play all</button>` +
+        `<button class="tlqueue">Queue</button><button class="tlpl">Playlist</button>` +
         `<button class="tlclosebtn">Close</button></div></div>` +
         `<div class="tlright"><div class="tlstate">loading tracklist…</div></div>`;
 
@@ -832,14 +842,14 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
             const q = document.createElement('button');
             q.className = 'tlq';
             q.title = 'add this song to queue';
-            q.textContent = '+';
+            q.innerHTML = ICONS.plus;
             q.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 q.textContent = '…';
                 const r = await ipcRenderer.invoke('collection:enqueue',
                     { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id });
                 q.textContent = r && r.ok ? '✓' : '×';
-                setTimeout(() => { q.textContent = '+'; }, 900);
+                setTimeout(() => { q.innerHTML = ICONS.plus; }, 900);
             });
             row.appendChild(q);
         }
@@ -1032,13 +1042,13 @@ $('more').addEventListener('click', (e) => {
         b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(b); });
         menu.appendChild(b);
     };
-    mk('＋ Add local files…', async (b) => {
+    mk('Add local files…', async (b) => {
         b.textContent = 'importing…';
         const r = await ipcRenderer.invoke('library:add').catch(() => null);
         closeMenu();
         if (r && r.ok && !r.canceled) collToast(`added ${r.added || 0} file${r.added === 1 ? '' : 's'}` + (r.updated ? ` (${r.updated} updated)` : ''));
     });
-    mk('♫ Import Bandcamp playlist…', async () => {
+    mk('Import Bandcamp playlist…', async () => {
         closeMenu();
         const url = await textPrompt('Bandcamp playlist URL', '');
         if (!url) return;
@@ -1052,8 +1062,8 @@ $('more').addEventListener('click', (e) => {
             collToast('import failed: ' + ((r && r.error) || 'unknown error'));
         }
     });
-    mk('⟳ Reload collection', () => { closeMenu(); reloadCollection(false); });
-    mk('⟳ Full re-scan (slow)', () => { closeMenu(); reloadCollection(true); });
+    mk('Reload collection', () => { closeMenu(); reloadCollection(false); });
+    mk('Full re-scan (slow)', () => { closeMenu(); reloadCollection(true); });
     document.body.appendChild(menu);
     menuEl = menu;
     const r = $('more').getBoundingClientRect();
@@ -1172,7 +1182,7 @@ async function renderPlaylistBrowser(): Promise<void> {
     wrap.className = 'pl-grid';
     const mkNew = document.createElement('button');
     mkNew.className = 'pl-new';
-    mkNew.innerHTML = '<span class="big">+</span><span>New playlist</span>';
+    mkNew.innerHTML = '<span class="big">' + ICONS.plus + '</span><span>New playlist</span>';
     mkNew.addEventListener('click', async () => {
         const name = await namePrompt('New playlist', '');
         if (!name) return;
@@ -1295,18 +1305,18 @@ async function renderPlaylistDetail(id: string): Promise<void> {
         actions.appendChild(b);
         return b;
     };
-    act('▶ Play', 'primary', () => void ipcRenderer.invoke('playlists:play', { id }));
-    act('+ Queue', '', async (b) => {
+    act('Play', 'primary', () => void ipcRenderer.invoke('playlists:play', { id }));
+    act('Queue', '', async (b) => {
         const r = await ipcRenderer.invoke('playlists:enqueue', id);
         b.textContent = r && r.ok ? 'added ✓' : 'failed';
-        setTimeout(() => { b.textContent = '+ Queue'; }, 900);
+        setTimeout(() => { b.textContent = 'Queue'; }, 900);
     });
     // downloads the tracks in order + playlist-cover.png + description.txt +
     // the order file (m3u/pls/… per the download settings)
-    act('⤓ Download', '', async (b) => {
+    act('Download', '', async (b) => {
         const r = await ipcRenderer.invoke('playlists:download', id);
         b.textContent = r && r.ok ? 'started ✓' : '× ' + ((r && r.error) || 'failed');
-        setTimeout(() => { b.textContent = '⤓ Download'; }, 1600);
+        setTimeout(() => { b.textContent = 'Download'; }, 1600);
     });
     // delete arms on the first click instead of a confirm dialog
     let armed = false;
@@ -1345,7 +1355,7 @@ async function renderPlaylistDetail(id: string): Promise<void> {
         const x = document.createElement('button');
         x.className = 'pl-x';
         x.title = 'Remove from playlist';
-        x.textContent = '✕';
+        x.innerHTML = ICONS.x;
         x.addEventListener('click', async (e) => {
             e.stopPropagation();
             await ipcRenderer.invoke('playlists:remove', { id, index: i });
@@ -1419,7 +1429,7 @@ async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<
             if (plOpen) void refreshPlaylists();
         });
     }
-    addRow('+ New playlist…', async () => {
+    addRow('New playlist…', async () => {
         closeMenu();
         const name = await namePrompt('New playlist', '');
         if (!name) return;

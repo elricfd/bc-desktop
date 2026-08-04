@@ -53,11 +53,13 @@ function render(results: Result[]): void {
             act.className = 'ract';
             const play = document.createElement('button');
             play.title = 'play';
-            play.textContent = '▶';
+            // Dazzle Line Icons play triangle
+            play.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M7 5L19 12L7 19V5Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
             play.addEventListener('click', (e) => { e.stopPropagation(); ipcRenderer.invoke('collection:play', playReq(r)); });
+            const PLUS = '<svg viewBox="0 0 24 24" fill="none"><path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
             const enq = document.createElement('button');
             enq.title = 'add to queue';
-            enq.textContent = '+';
+            enq.innerHTML = PLUS;
             enq.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const req = playReq(r);
@@ -66,7 +68,7 @@ function render(results: Result[]): void {
                     trackId: r.type === 't' ? r.id : undefined,
                 });
                 enq.textContent = res && res.ok ? '✓' : '×';
-                setTimeout(() => { enq.textContent = '+'; }, 900);
+                setTimeout(() => { enq.innerHTML = PLUS; }, 900);
             });
             act.appendChild(play);
             act.appendChild(enq);
