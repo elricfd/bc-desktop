@@ -1,7 +1,7 @@
 // minimal local audio metadata reader for the local-files library.
 // modeled on quodlibet/mutagen's approach: every format is normalized into ONE
 // flat schema (title/artist/album/albumartist/year/tracknum/genre/duration/art)
-// with graceful degradation — a broken or missing tag never throws, it just
+// with graceful degradation - a broken or missing tag never throws, it just
 // yields fewer fields, and the importer falls back to the filename (quodlibet
 // does exactly this for WAV, whose metadata story is hopeless).
 // read-only by design: we never rewrite the user's files, so there is zero
@@ -27,7 +27,7 @@ const empty = (): LocalTags => ({ title: '', artist: '', album: '', albumArtist:
 
 // ---------------------------------------------------------------------------
 // id3v2 (mp3, and embedded in wav/aiff chunks). "ID3 is absolutely the worst
-// thing ever" — quodlibet/formats/_id3.py. we read the handful of frames that
+// thing ever" - quodlibet/formats/_id3.py. we read the handful of frames that
 // map onto our schema (their IDS table): TIT2 TPE1 TALB TPE2 TRCK TCON APIC,
 // plus TDRC (v2.4) / TYER (v2.3) for the year and the 3-char v2.2 variants.
 // ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ function parseId3v1(fd: number, fileSize: number, t: LocalTags): void {
 
 // ---------------------------------------------------------------------------
 // mp3 duration: Xing/Info/VBRI header when present (VBR), else a CBR estimate
-// from the first frame's bitrate — the same ladder mutagen's MPEGInfo climbs.
+// from the first frame's bitrate - the same ladder mutagen's MPEGInfo climbs.
 // ---------------------------------------------------------------------------
 
 const BITRATES_V1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
@@ -427,7 +427,7 @@ function readAiff(fd: number, fileSize: number): LocalTags | null {
 
 // ---------------------------------------------------------------------------
 // ogg vorbis / opus: comments from the header packets near the start; duration
-// from the last page's granule position (samples) — scan the tail for "OggS".
+// from the last page's granule position (samples) - scan the tail for "OggS".
 // ---------------------------------------------------------------------------
 
 function readOgg(fd: number, fileSize: number): LocalTags | null {
@@ -470,7 +470,7 @@ function readOgg(fd: number, fileSize: number): LocalTags | null {
 }
 
 // ---------------------------------------------------------------------------
-// m4a/mp4: atom tree — moov.mvhd for duration, moov.udta.meta.ilst for tags
+// m4a/mp4: atom tree - moov.mvhd for duration, moov.udta.meta.ilst for tags
 // (©nam/©ART/©alb/aART/©day/©gen/trkn/covr), like mutagen's mp4 module.
 // ---------------------------------------------------------------------------
 

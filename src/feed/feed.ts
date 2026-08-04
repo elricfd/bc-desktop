@@ -46,7 +46,7 @@ function visible(): FeedStory[] {
 
 function updateCount(): void {
     const v = visible();
-    countEl.textContent = v.length + (v.length === 1 ? ' story' : ' stories') + (fetching ? ' — loading…' : '');
+    countEl.textContent = v.length + (v.length === 1 ? ' story' : ' stories') + (fetching ? ' - loading…' : '');
 }
 
 const storyKey = (s: FeedStory): string => s.type + ':' + s.tralbumType + s.tralbumId + ':' + s.date;
@@ -128,7 +128,7 @@ async function togglePanel(s: FeedStory, card: HTMLElement): Promise<void> {
         `<div class="fdleft"><img class="fdart"${s.art ? ` src="${s.art}"` : ''}>` +
         `<div class="fdtitle">${escapeHtml(s.title || 'Untitled')}</div>` +
         `<div class="fdartist">${escapeHtml(s.artist)}</div>` +
-        `<div class="fdwhen">${escapeHtml(dayLabel(s.date))}${s.via ? ' — collected by ' + escapeHtml(s.via) : ''}</div>` +
+        `<div class="fdwhen">${escapeHtml(dayLabel(s.date))}${s.via ? ' - collected by ' + escapeHtml(s.via) : ''}</div>` +
         `<div class="fdbtns"><button class="fdplayall">▶ Play</button>` +
         `<button class="fdqueue">+ Queue</button><button class="fdopen">Open page</button><button class="fdclose">Close</button></div></div>` +
         `<div class="fdright"><div class="fdtags"></div><div class="fdabout" style="display:none"></div>` +
@@ -208,7 +208,7 @@ function render(): void {
     updateCount();
     if (!v.length) {
         closePanel();
-        setState(fetching ? 'Loading your feed…' : 'nothing here — follow some artists on bandcamp and check back.');
+        setState(fetching ? 'Loading your feed…' : 'nothing here - follow some artists on bandcamp and check back.');
         return;
     }
     // detach the open panel so a re-render (new page / filter) doesn't destroy it

@@ -158,7 +158,7 @@ export class BandcampApi {
         }
         // web (info) endpoint first: its `artist` is the release's own artist (e.g. a
         // side-project on a label's page), whereas mobile's tralbum_artist is the band
-        // — using mobile first showed the band name instead of the release artist.
+        // - using mobile first showed the band name instead of the release artist.
         return [info.toString(), mobile.toString()];
     }
 
@@ -226,7 +226,7 @@ export class BandcampApi {
         for (const type of types) {
             // try EACH endpoint (web then mobile) and use the first that yields
             // tracks. going through fetchRaw returned the first *object* the web
-            // endpoint gave — if that was a trackless/error payload, the mobile
+            // endpoint gave - if that was a trackless/error payload, the mobile
             // endpoint was never tried and the tracklist came back empty.
             for (const url of this.attemptUrls(type, q.tralbumId, q.bandId)) {
                 const data = await this.fetchRawFrom(url);
@@ -417,7 +417,7 @@ export class BandcampApi {
         const added = Date.parse(it.purchased || it.added || it.date_added || '') || 0;
         // release year: bandcamp's collection api usually omits it, so this is often 0
         // and gets filled in later by fetchReleaseYear (see collection:enrich-years).
-        // deliberately NOT falling back to the added date — that made "sort by year"
+        // deliberately NOT falling back to the added date - that made "sort by year"
         // behave like "sort by date added".
         const rel = it.release_date || it.releaseDate || '';
         const year = Number(String(rel).match(/\b(19|20)\d{2}\b/)?.[0]) || 0;
@@ -446,7 +446,7 @@ export class BandcampApi {
     /**
      * stopAtKeys: keys ("<type><id>") already known to the caller. the collection
      * api pages newest-first, so hitting a known item means everything after it is
-     * already cached — stop there. this is what makes Reload/startup an
+     * already cached - stop there. this is what makes Reload/startup an
      * incremental "check for new purchases" instead of a full re-scan.
      */
     async fetchCollection(
@@ -600,7 +600,7 @@ export class BandcampApi {
 
     /**
      * bandcamp's dash feed is a stored SNAPSHOT that only regenerates when the
-     * fan's feed page is actually visited — fan_dash_feed_updates just reads it.
+     * fan's feed page is actually visited - fan_dash_feed_updates just reads it.
      * without this poke the feed ended at whenever the user last opened
      * bandcamp's own feed page (newer releases simply weren't in the snapshot).
      */
@@ -611,7 +611,7 @@ export class BandcampApi {
             const name = await this.getFanUsername();
             const url = name ? `https://bandcamp.com/${encodeURIComponent(name)}/feed` : 'https://bandcamp.com/feed';
             const r = await session.fetch(url, { credentials: 'include' } as any);
-            await r.text(); // consume — the page visit itself triggers regeneration
+            await r.text(); // consume - the page visit itself triggers regeneration
         } catch { /* snapshot stays stale; updates endpoint still works */ }
     }
 
@@ -733,7 +733,7 @@ export class BandcampApi {
                 ok: true,
                 results: rows.map((x: any) => {
                     // the api's `img` field uses the no-prefix image-id form, which
-                    // only exists for band/fan photos — for tracks/albums it 404s
+                    // only exists for band/fan photos - for tracks/albums it 404s
                     // (dead icons). release art must be built from art_id with the
                     // `a` prefix.
                     const artId = toId(x.art_id);
@@ -780,7 +780,7 @@ export class BandcampApi {
     /**
      * crude html→plain-text for scraped lyric rows. tag stripping loops to a
      * fixed point so nested/split tags can never leave residue like "<script",
-     * and entities decode AFTER the strip with &amp; handled LAST — decoding it
+     * and entities decode AFTER the strip with &amp; handled LAST - decoding it
      * first turned "&amp;quot;" into '"' (double-unescape). the output is only
      * ever written into id3 text frames, never rendered as html.
      */
@@ -797,7 +797,7 @@ export class BandcampApi {
     /**
      * everything needed to download a release's streams with proper tags: album,
      * album artist, year, cover url, and per-track title/artist/number/lyrics/
-     * stream url. accepts a page url (richest payload — the page blob can carry
+     * stream url. accepts a page url (richest payload - the page blob can carry
      * lyrics) or tralbum ids.
      */
     async fetchReleaseForDownload(q: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }): Promise<{
@@ -820,7 +820,7 @@ export class BandcampApi {
                         if (m) {
                             try { data = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')); } catch { /* fall through */ }
                         }
-                        // lyrics usually are NOT in the blob — the page renders them
+                        // lyrics usually are NOT in the blob - the page renders them
                         // as <tr id="lyrics_row_<trackNum>"> rows (BandcampDownloader
                         // does the same scrape)
                         if (data && Array.isArray(data.trackinfo)) {
@@ -926,7 +926,7 @@ export class BandcampApi {
 // --- bandcamp fan playlist page parsing --------------------------------------
 // a /playlist/<id> page ships a data-blob attribute whose appData carries the
 // playlist (title/description/imageId) and every track with its band id, parent
-// album id, art id and duration — exactly the resolver handles our own playlist
+// album id, art id and duration - exactly the resolver handles our own playlist
 // entries store. stream urls in the blob are short-lived and deliberately
 // ignored; playback resolves lazily like everything else.
 

@@ -129,7 +129,7 @@
 
     <div class="section">
         <h2>Keybinds</h2>
-        <div class="hint" style="margin-bottom:10px;">click a keybind, then press the new combination — or press Esc/Backspace to remove the keybind ("none" = shortcut disabled; click the button again to cancel). combinations need Ctrl/Alt to avoid clashing with typing &amp; media keys.</div>
+        <div class="hint" style="margin-bottom:10px;">click a keybind, then press the new combination - or press Esc/Backspace to remove the keybind ("none" = shortcut disabled; click the button again to cancel). combinations need Ctrl/Alt to avoid clashing with typing &amp; media keys.</div>
         <div class="row" style="margin-top:6px;"><span style="font-size:12px;color:#fff;">open collection</span><button class="ghost kb" id="kbCollection" style="margin:0;min-width:130px;"></button></div>
         <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#fff;">open feed</span><button class="ghost kb" id="kbFeed" style="margin:0;min-width:130px;"></button></div>
         <div class="row" style="margin-top:8px;"><span style="font-size:12px;color:#fff;">go to homepage</span><button class="ghost kb" id="kbHome" style="margin:0;min-width:130px;"></button></div>
@@ -167,7 +167,7 @@
         <label style="margin-top:10px;">Playlist filename</label>
         <input type="text" id="playlistNameFmt" placeholder="{album}" autocomplete="off">
         <div style="height:1px;background:#2a2e30;margin:16px 0;"></div>
-        <label class="toggle"><input type="checkbox" id="cacheReleases"> permanently cache release data on this computer (covers, tracklists, album info — never audio)</label>
+        <label class="toggle"><input type="checkbox" id="cacheReleases"> permanently cache release data on this computer (covers, tracklists, album info - never audio)</label>
         <label style="margin-top:10px;">Cache location</label>
         <div class="row" style="gap:8px;margin-top:2px;">
             <input type="text" id="cacheDir" readonly style="flex:1;" title="where cached covers are stored">
@@ -206,7 +206,7 @@
         <div class="hint" id="updStatus" style="margin:6px 0 0;"></div>
     </div>
 
-    <button id="btnSave">Save</button>
+    <button id="btnSave" disabled title="loading settings…">Save</button>
     <span class="status" id="saveStatus" style="margin-left:10px;"></span>
     </div>
     <!-- /.body -->
@@ -452,7 +452,7 @@
                     checking: 'checking for updates…',
                     downloading: 'downloading update' + (st.info ? ' ' + st.info : '') + '…',
                     latest: "you're on the latest version.",
-                    downloaded: 'update ' + (st.info || '') + ' downloaded — restart to install.',
+                    downloaded: 'update ' + (st.info || '') + ' downloaded - restart to install.',
                     error: 'update check failed: ' + (st.info || '?'),
                 };
                 $('updStatus').textContent = map[st.state] !== undefined ? map[st.state] : '';
@@ -461,7 +461,7 @@
             ipcRenderer.invoke('updates:info').then((u) => {
                 if (!u) return;
                 $('appVersion').textContent = 'Bandcamp Desktop v' + u.version +
-                    (u.packaged ? '' : ' (dev build — self-update disabled)');
+                    (u.packaged ? '' : ' (dev build - self-update disabled)');
                 if (u.status) renderUpd(u.status);
             }).catch(() => { $('appVersion').textContent = 'version unknown'; });
             ipcRenderer.on('updates:status', (_e, st) => renderUpd(st || {}));
@@ -490,7 +490,7 @@
                 await persist();
                 const res = await ipcRenderer.invoke('lastfm:begin-auth');
                 if (res.error) { $('lfmStatus').textContent = res.error; $('lfmStatus').className = 'status err'; }
-                else { $('lfmStatus').textContent = 'Authorize in your browser — this will connect automatically…'; $('lfmStatus').className = 'status'; }
+                else { $('lfmStatus').textContent = 'Authorize in your browser - this will connect automatically…'; $('lfmStatus').className = 'status'; }
             };
 
             // auto-detected once the user approves in their browser (no button needed)
@@ -506,7 +506,8 @@
                 $('lfmUser').className = 'status ok';
             });
 
-            load();
+            load().then(() => { $('btnSave').disabled = false; $('btnSave').title = ''; })
+                .catch((e) => { $('fatal').textContent = 'settings failed to load: ' + (e && e.message); });
         }
     </script>
 </body>

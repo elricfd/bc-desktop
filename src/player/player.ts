@@ -194,7 +194,7 @@ ipcRenderer.on('player:stream-incoming', (_e, data: StreamPayload) => {
     if (!data?.queue?.length) return;
     const target = data.queue[data.activeIndex] || data.queue[0];
     // retrap of the track already loaded: that's the user clicking the page's
-    // play button again — toggle play/pause (burst dedup happens main-side)
+    // play button again - toggle play/pause (burst dedup happens main-side)
     if (queue.current()?.id === target?.id && queue.current()?.id) { doToggle(); return; }
 
     // once loaded release muted page player keeps advancing thru it (each cancelled stream makes it skip to next track) firing burst of identical queue events. acting on them makes player race to last track & floods bandcamp w/ stream reqs (http 429). ignore same queue events for short window; diff release (or deliberate replay after burst) still loads.
@@ -330,7 +330,7 @@ function mediaHotkeyOf(e: KeyboardEvent): string {
     if (space && tag === 'BUTTON') return ''; // let a focused button click natively
     if (space) return 'toggle';
     // focused slider: PLAIN arrows stay native (that's the click-then-scrub flow),
-    // but shift+arrows are still ours — track skip & volume work everywhere
+    // but shift+arrows are still ours - track skip & volume work everywhere
     if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : (isRange ? '' : 'seek-back');
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : (isRange ? '' : 'seek-fwd');
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';

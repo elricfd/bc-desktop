@@ -127,7 +127,7 @@ export class PresenceService {
 
         try {
             await this.client.user?.setActivity(activity);
-            this.log('setActivity ok: ' + activity.details + ' — ' + activity.state);
+            this.log('setActivity ok: ' + activity.details + ' - ' + activity.state);
         } catch (err: any) {
             // discord may reject external image url; retry text only so
             // presence still shows then give up (failure shouldn't wedge next track)

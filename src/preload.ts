@@ -21,7 +21,7 @@ else document.addEventListener('DOMContentLoaded', () => (document.head || docum
 
 // failsafe: if darkreader never paints (script error, throttled subresources),
 // the cloak used to leave the page an empty grey forever. lift it after a few
-// seconds — worst case is a brief unthemed flash instead of a hang.
+// seconds - worst case is a brief unthemed flash instead of a hang.
 if (bcTheme !== 'light') {
     setTimeout(() => {
         try {
@@ -139,7 +139,7 @@ document.addEventListener('keydown', (e) => {
 // media hotkeys (soundcloud-style) from bandcamp pages: space play/pause,
 // ←/→ scrub 5s (hold to keep scrubbing), shift+←/→ prev/next, shift+↑/↓ volume.
 // mapped here (not in main) so typing in the page's inputs is never hijacked.
-// NOTE: keep in sync with player.ts / collection.ts / header.html — this preload
+// NOTE: keep in sync with player.ts / collection.ts / header.html - this preload
 // is sandboxed so the mapping can't live in a shared module.
 const isTypingEl = (el: any): boolean => {
     if (!el || !el.tagName) return false;
@@ -178,7 +178,7 @@ document.addEventListener('keydown', (e) => {
     try { ipcRenderer.send('player:hotkey', cmd); } catch (err) { /* bridge gone */ }
 }, true);
 
-// fan playlist page play buttons — header AND rows — are intercepted entirely.
+// fan playlist page play buttons - header AND rows - are intercepted entirely.
 // bandcamp's player preloads track 1 without a stream request, so the audio
 // trap never saw header/first-row clicks (they looked dead) and its metadata
 // fallback painted the page <title> into the player. every playlist button
@@ -199,7 +199,7 @@ document.addEventListener('click', (e) => {
 
 // mirror OUR playback onto the release page's inline player (play state,
 // progress bar, elapsed/total time) so it works like the native one. only when
-// the playing track belongs to THIS page (url match) — other releases' players
+// the playing track belongs to THIS page (url match) - other releases' players
 // are left alone. clicking its progress bar seeks our player.
 const fmtClock = (x: number): string => Math.floor(x / 60) + ':' + String(Math.floor(x % 60)).padStart(2, '0');
 ipcRenderer.on('page:now-playing', (_e, np: any) => {
@@ -272,7 +272,7 @@ function injectReleaseDownload(): void {
                 btn.textContent = '⤓ starting…';
                 try {
                     const r = await ipcRenderer.invoke('download:release', { url: location.href.split(/[?#]/)[0] });
-                    btn.textContent = r && r.ok ? '⤓ downloading — see the downloads panel' : '⤓ ' + ((r && r.error) || 'failed');
+                    btn.textContent = r && r.ok ? '⤓ downloading - see the downloads panel' : '⤓ ' + ((r && r.error) || 'failed');
                 } catch { btn.textContent = '⤓ failed'; }
             });
             anchor.parentElement!.insertBefore(btn, anchor.nextSibling);

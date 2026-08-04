@@ -46,7 +46,7 @@ function render(results: Result[]): void {
         row.innerHTML =
             `<img class="rart" loading="lazy"${r.art ? ` src="${r.art}"` : ''}>` +
             `<div class="rmeta"><div class="rname">${escapeHtml(r.name)}</div>` +
-            `<div class="rsub">${escapeHtml(r.band)}${r.album && r.type === 't' ? ' — ' + escapeHtml(r.album) : ''}</div></div>` +
+            `<div class="rsub">${escapeHtml(r.band)}${r.album && r.type === 't' ? ' - ' + escapeHtml(r.album) : ''}</div></div>` +
             `<span class="rbadge${r.type === 'b' ? ' b' : ''}">${BADGE[r.type] || escapeHtml(r.type)}</span>`;
         if (r.type === 't' || r.type === 'a') {
             const act = document.createElement('div');
@@ -109,7 +109,7 @@ $('f-b').addEventListener('click', () => setFilter('b'));
 $('close').addEventListener('click', () => ipcRenderer.send('gsearch:close'));
 ipcRenderer.on('gsearch:shown', () => q.focus());
 // nothing from a search is kept: closing the view wipes the query & results
-// (search itself never writes to any cache — this clears the visible leftovers)
+// (search itself never writes to any cache - this clears the visible leftovers)
 ipcRenderer.on('gsearch:hidden', () => {
     seq++; // invalidate any in-flight request
     q.value = '';

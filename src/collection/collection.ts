@@ -188,7 +188,7 @@ function createCard(it: CollectionItem): HTMLElement {
     wrap.innerHTML = `<img class="art" loading="lazy" src="${it.art}">`;
     // dragging a cover exports the full-size art as a real file. hover prefetches
     // the full-size jpg; dragstart checks (sync) that it's ready and only then
-    // hands the drag to main — startDrag must run inside the live drag gesture,
+    // hands the drag to main - startDrag must run inside the live drag gesture,
     // so if the file isn't there yet the default (thumbnail) drag proceeds.
     const img = wrap.querySelector('img.art') as HTMLImageElement;
     const artReq = { tralbumType: it.tralbumType, tralbumId: it.tralbumId, art: it.art, title: it.title, artist: it.artist };
@@ -283,7 +283,7 @@ function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
         b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
         menu.appendChild(b);
     };
-    // the picker replaces this menu itself — no closeMenu() here (it would
+    // the picker replaces this menu itself - no closeMenu() here (it would
     // tear down the picker it just opened)
     mk('+ Add to playlist…', () => openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY));
     mk('Remove from library', async () => {
@@ -305,19 +305,19 @@ function softRender(): void {
 
     if (!list.length) {
         // ALWAYS clear stale results. previously, while loading, an unmatched query
-        // returned early and left the previous (shorter-prefix) match rendered —
+        // returned early and left the previous (shorter-prefix) match rendered -
         // typing "helloa" kept showing the results for "hello".
         closeTracklist();
         currentlyRenderedCount = 0;
-        setState(loading ? 'nothing matches yet — still loading…' : 'nothing matches your search.');
+        setState(loading ? 'nothing matches yet - still loading…' : 'nothing matches your search.');
         return;
     }
 
     // If we are applying a search/sort filter, group headers, or it's the very
     // first chunk, we MUST wipe the grid.
     if (currentlyRenderedCount === 0 || searchEl.value.trim() !== '' || sortEl.value !== 'added' || gridHeadersOn) {
-        // detach the open tracklist (don't destroy it) so re-renders during load —
-        // new item batches, index updates — can re-seat it instead of closing it
+        // detach the open tracklist (don't destroy it) so re-renders during load -
+        // new item batches, index updates - can re-seat it instead of closing it
         const openCardId = openId;
         if (tlEl) tlEl.remove();
         grid.innerHTML = '';
@@ -366,7 +366,7 @@ function forceRender(): void {
 // track list view: every track of every (filtered) release as one flat table.
 // track rows come from the release index; releases not indexed yet render as a
 // single album row. the table is VIRTUALIZED: the full row model is computed,
-// but only the rows in (and around) the viewport get DOM — genre grouping
+// but only the rows in (and around) the viewport get DOM - genre grouping
 // duplicates every release under each of its tags, so a big collection easily
 // exceeds 50k rows and a one-shot render froze the view for many seconds.
 // fixed row heights make the offsets exact, so the scrollbar never jumps and
@@ -552,7 +552,7 @@ function renderList(list: CollectionItem[]): void {
     lvSpace = null;
     listRows = applyListSort(buildListRows(list));
     if (!listRows.length) {
-        setState(loading ? 'nothing matches yet — still loading…' : 'nothing matches your search.');
+        setState(loading ? 'nothing matches yet - still loading…' : 'nothing matches your search.');
         return;
     }
     const head = document.createElement('div');
@@ -623,7 +623,7 @@ function jumpToListGroup(key: ListSortKey, label: string): void {
     listSort = { key, desc: false };
     if (key === 'year') requestYears();
     setViewMode('list');
-    // seek in the row MODEL, not the DOM — with the virtual scroller only the
+    // seek in the row MODEL, not the DOM - with the virtual scroller only the
     // viewport's rows exist, but every group header is present in listRows
     const target = label.trim().toLowerCase();
     let exact = -1;
@@ -716,7 +716,7 @@ ipcRenderer.invoke('settings:get').then((s: any) => {
 }).catch(() => { /* keep off */ });
 
 // explicitRow: user clicked a specific row of an expanded album tracklist (play
-// that album from there). otherwise a single-track purchase plays JUST its track —
+// that album from there). otherwise a single-track purchase plays JUST its track -
 // the parent album is only resolved for metadata, not queued wholesale.
 async function play(it: CollectionItem, activeIndex = 0, explicitRow = false): Promise<void> {
     const trackOnly = it.tralbumType === 't' && !explicitRow;
@@ -808,7 +808,7 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
         // network was unavailable: this list came from the saved index
         const note = document.createElement('div');
         note.className = 'tlstate';
-        note.textContent = 'offline — showing the saved tracklist';
+        note.textContent = 'offline - showing the saved tracklist';
         right.appendChild(note);
     }
     res.tracks.forEach((t, i) => {
@@ -826,7 +826,7 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
             openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id }, e.clientX, e.clientY);
         });
         // per-song add-to-queue (revealed on row hover); click plays as before.
-        // cached (offline) rows carry no track id, so the button is omitted —
+        // cached (offline) rows carry no track id, so the button is omitted -
         // it would queue the whole release instead of the song
         if (t.id) {
             const q = document.createElement('button');
@@ -900,9 +900,9 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
         b.textContent = f.label;
         b.addEventListener('click', async (e) => {
             e.stopPropagation();
-            b.textContent = f.label + ' — preparing…';
+            b.textContent = f.label + ' - preparing…';
             await ipcRenderer.invoke('download:start', f.url);
-            b.textContent = f.label + ' — started ✓';
+            b.textContent = f.label + ' - started ✓';
             setTimeout(closeMenu, 900);
         });
         menu.appendChild(b);
@@ -910,7 +910,7 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
     positionMenu(menu, anchor); 
 }
 // CAPTURE phase, with an outside-click check: the tracklist panel (and other
-// zones) stopPropagation on bubble, which used to strand open menus — the
+// zones) stopPropagation on bubble, which used to strand open menus - the
 // playlist picker opened from a track row could only be dismissed by opening
 // another album. capture fires before any stopPropagation can interfere, and
 // the contains() check keeps clicks inside the menu working.
@@ -1120,7 +1120,7 @@ function setPlaylistsOpen(open: boolean): void {
     plOpen = open;
     plov.style.display = open ? '' : 'none';
     grid.style.display = open ? 'none' : '';
-    // search/sort/direction/viewmode act on the grid, not playlists — hide them
+    // search/sort/direction/viewmode act on the grid, not playlists - hide them
     searchEl.style.display = open ? 'none' : '';
     viewBtn.style.display = open ? 'none' : '';
     sortEl.style.display = open || viewMode === 'list' ? 'none' : '';
@@ -1326,7 +1326,7 @@ async function renderPlaylistDetail(id: string): Promise<void> {
     if (!p.entries.length) {
         const st = document.createElement('div');
         st.className = 'state';
-        st.textContent = 'This playlist is empty — right-click covers or songs in your collection to add them.';
+        st.textContent = 'This playlist is empty - right-click covers or songs in your collection to add them.';
         plov.appendChild(st);
         return;
     }
@@ -1433,7 +1433,7 @@ async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<
 }
 
 // window.prompt doesn't exist in electron renderers: tiny one-field modal.
-// resolves the trimmed text ('' allowed — that's how a description is cleared)
+// resolves the trimmed text ('' allowed - that's how a description is cleared)
 // or null when cancelled. multiline uses a textarea (Ctrl+Enter submits).
 function textPrompt(title: string, initial: string, multiline = false): Promise<string | null> {
     return new Promise((resolve) => {
