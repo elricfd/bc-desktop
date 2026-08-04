@@ -36,6 +36,10 @@ export class LastfmService {
     private scrobbled = false;
     /** last observed playback position; detects loop restarts (repeat-one) */
     private lastPos = 0;
+    /** failed scrobbles retry no sooner than this - a sustained failure used to
+     * retry EVERY progress tick (~1 POST/second), which is exactly the kind of
+     * traffic that gets an api key suspended. */
+    private nextRetryAt = 0;
 
     constructor(private readonly store: Store) {}
 
@@ -62,10 +66,45 @@ export class LastfmService {
         return Boolean(c.enabled && c.apiKey && c.apiSecret && c.sessionKey);
     }
 
+    /** outcome of the most recent api submission (settings shows this). */
+    private lastResult: { ok: boolean; detail: string; at: number } | null = null;
+    private noteResult(kind: string, data: any, err?: any): void {
+        if (err) {
+            this.lastResult = { ok: false, detail: kind + ' failed: ' + (err?.message || 'network error'), at: Date.now() };
+        } else if (data && data.error) {
+            // last.fm returns {error, message} json on rejection - previously
+            // discarded, which made a dead session/key look like silence
+            let detail = kind + ' rejected by last.fm (' + data.error + '): ' + (data.message || '');
+            if (Number(data.error) === 26) {
+                // suspension is SERVER-side and per-key: no client change can
+                // revive it - only a fresh key helps
+                detail += ' - this key was suspended by last.fm; create a NEW api key at https://www.last.fm/api/account/create and save the new key + secret here.';
+            }
+            this.lastResult = { ok: false, detail, at: Date.now() };
+        } else {
+            this.lastResult = { ok: true, detail: kind + ' ok', at: Date.now() };
+        }
+    }
+
+    /**
+     * why scrobbling is (not) happening, for the settings window. every failure
+     * in the scrobble path is deliberately non-fatal, which also made every
+     * misconfiguration silent - this makes the reason visible.
+     */
+    status(): { ready: boolean; reason: string; last: { ok: boolean; detail: string; at: number } | null } {
+        const c = this.cfg();
+        const reason = !c.enabled ? 'scrobbling is disabled'
+            : !c.apiKey ? 'no api key saved'
+            : !c.apiSecret ? 'no shared secret saved'
+            : !c.sessionKey ? 'account not connected (authorize below)'
+            : '';
+        return { ready: !reason, reason, last: this.lastResult };
+    }
+
     /**
      * md5 signature over alphabetically sorted params + shared secret.
      * NOTE: md5 here is MANDATED by the Last.fm API auth spec (the api_sig must be
-     * md5(sorted params + secret)) — it's a protocol requirement, not a security
+     * md5(sorted params + secret)) - it's a protocol requirement, not a security
      * hash of sensitive data, so the CodeQL "weak crypto" alert is a false positive
      * for this call and can be dismissed. https://www.last.fm/api/authspec
      */
@@ -102,7 +141,12 @@ export class LastfmService {
         if (!c.apiKey || !c.apiSecret) return { error: 'Missing Last.fm API key/secret' };
         try {
             const data = await this.call({ method: 'auth.getToken', api_key: c.apiKey }, 'GET');
-            if (!data.token) return { error: data.message || 'Could not get token' };
+            if (!data.token) {
+                if (Number(data.error) === 26) {
+                    return { error: 'this api key was suspended by last.fm - create a new key at https://www.last.fm/api/account/create and save the new key + secret here, then connect again' };
+                }
+                return { error: data.message || 'Could not get token' };
+            }
             this.pendingToken = data.token;
             return { authUrl: `https://www.last.fm/api/auth/?api_key=${c.apiKey}&token=${data.token}` };
         } catch (e: any) {
@@ -160,10 +204,11 @@ export class LastfmService {
         this.lastNowPlaying = key;
         this.scrobbled = false;
         this.lastPos = 0;
+        this.nextRetryAt = 0;
 
         const c = this.cfg();
         try {
-            await this.call(
+            const res = await this.call(
                 {
                     method: 'track.updateNowPlaying',
                     artist: track.artist,
@@ -175,25 +220,30 @@ export class LastfmService {
                 },
                 'POST'
             );
-        } catch {
-            // non fatal
+            this.noteResult('now playing', res);
+        } catch (err) {
+            this.noteResult('now playing', null, err); // non fatal
         }
     }
 
     /** called on progress; submits scrobble once play threshold is met. */
     async maybeScrobble(track: NowPlaying): Promise<void> {
         if (!this.isReady() || !track.title || !track.artist) return;
-        // repeat-one: the SAME track restarting is a NEW play — last.fm counts
+        // repeat-one: the SAME track restarting is a NEW play - last.fm counts
         // every loop, but the scrobbled flag only reset on track CHANGE, so
-        // loops after the first never scrobbled. a jump back to the start after
-        // real listening re-arms the scrobble and re-announces now playing.
-        // (small back-seeks don't re-arm: they don't land near 0.)
-        if (this.scrobbled && track.position < 5 && this.lastPos > Math.max(30, track.position + 30)) {
+        // loops after the first never scrobbled. a 10s+ jump back landing near
+        // the start re-arms the scrobble and re-announces now playing. scrobbled
+        // being true already proves a threshold-crossing listen happened, so the
+        // guard can stay small - a hard lastPos>30 floor silently broke looping
+        // for 31-35s tracks, whose final tick never exceeds 30.
+        // (ordinary back-seeks don't re-arm: they don't land near 0.)
+        if (this.scrobbled && track.position < 5 && this.lastPos > track.position + 10) {
             this.scrobbled = false;
             this.lastNowPlaying = '';
         }
         this.lastPos = track.position;
         if (this.scrobbled) return;
+        if (Date.now() < this.nextRetryAt) return; // backing off after a failure
         const minLen = this.cfg().minScrobbleLen;
         const threshold = scrobbleThreshold(track.duration, minLen);
         if (threshold === null || track.position < threshold) return;
@@ -202,7 +252,7 @@ export class LastfmService {
         const c = this.cfg();
         const startedAt = Math.floor(Date.now() / 1000 - track.position);
         try {
-            await this.call(
+            const res = await this.call(
                 {
                     method: 'track.scrobble',
                     artist: track.artist,
@@ -215,9 +265,12 @@ export class LastfmService {
                 },
                 'POST'
             );
-        } catch {
-            // allow retry on next tick
-            this.scrobbled = false; 
+            this.noteResult('scrobble', res);
+        } catch (err) {
+            this.noteResult('scrobble', null, err);
+            // allow a retry, but only after a cooldown
+            this.scrobbled = false;
+            this.nextRetryAt = Date.now() + 30000;
         }
     }
 }
