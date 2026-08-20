@@ -245,20 +245,6 @@ function createCard(it: CollectionItem): HTMLElement {
         dl.innerHTML = ICONS.download;
         dl.addEventListener('click', (e) => { e.stopPropagation(); openDownloadMenu(it, dl); });
         wrap.appendChild(dl);
-    } else if (it.wish) {
-        // not owned: download the mp3-128 streams instead (tagged, with cover)
-        const dl = document.createElement('button');
-        dl.className = 'dl';
-        dl.title = 'download streams (mp3-128, tagged)';
-        dl.innerHTML = ICONS.download;
-        dl.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            dl.textContent = '…';
-            const r = await ipcRenderer.invoke('download:release', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, url: it.url });
-            dl.textContent = r && r.ok ? '✓' : '×';
-            setTimeout(() => { dl.innerHTML = ICONS.download; }, 1200);
-        });
-        wrap.appendChild(dl);
     }
     card.appendChild(wrap);
     
