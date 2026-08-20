@@ -514,7 +514,10 @@ export class BandcampApi {
             let hitKnown = false;
             for (const it of items) {
                 const c = this.normalizeCollectionItem(it, redl);
-                if (kind === 'wishlist') c.wish = true;
+                // ALWAYS explicit: an owned payload that merely omitted the key
+                // could not clear a stale wish flag when merged over the old
+                // copy (buying a wishlisted album left it in the wishlist).
+                c.wish = kind === 'wishlist';
                 const key = c.tralbumType + c.tralbumId;
                 if (!c.tralbumId || seen.has(key)) continue;
                 if (stopAtKeys && stopAtKeys.has(key)) { hitKnown = true; break; }
