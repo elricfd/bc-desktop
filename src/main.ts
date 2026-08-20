@@ -188,6 +188,17 @@ function initDiskCaches(): void {
 // ids are namespaced 'local:…' and every resolver branches on that prefix BEFORE
 // any bandcamp id math (toIdStr would mangle them).
 const LOCAL_PREFIX = 'local:';
+/**
+ * do we OWN this release? only purchased items carry a bandcamp redownload
+ * page url in the collection listing. downloading is gated on this: the app
+ * never pulls audio for releases the user hasn't bought.
+ */
+function ownsRelease(type: unknown, id: unknown): boolean {
+    const tid = toIdStr(id);
+    if (!tid) return false;
+    const t = type === 't' ? 't' : 'a';
+    return collectionItemsDisk.get().some((c: any) => !c.wish && c.tralbumType === t && c.tralbumId === tid && c.downloadUrl);
+}
 const isLocalId = (id: unknown): boolean => String(id || '').startsWith(LOCAL_PREFIX);
 const localFileUrl = (p: string): string => { try { return p ? pathToFileURL(p).href : ''; } catch { return ''; } };
 function localAlbumKey(t: { albumArtist: string; artist: string; album: string; id: string }): string {
@@ -1791,6 +1802,7 @@ async function init() {
 
                 const artCache = new Map<string, Buffer | null>();
                 const files: { file: string; title: string; artist: string; duration: number }[] = [];
+                let skipped = 0; // entries from releases the user doesn't own
                 for (let i = 0; i < p.entries.length; i++) {
                     if (dlState.canceled) {
                         prog('cancelled', Math.round((i / p.entries.length) * 100));
@@ -1821,6 +1833,8 @@ async function init() {
                             files.push({ file, title: e.title, artist: e.artist, duration: e.duration || 0 });
                             continue;
                         }
+                        // bandcamp entry: only releases you own are downloadable
+                        if (!ownsRelease(e.tralbumType, e.tralbumId)) { skipped++; continue; }
                         const track = await bandcampApi.resolveStream({ bandId: e.bandId, tralbumId: e.tralbumId, tralbumType: e.tralbumType, trackId: e.id });
                         if (!track || !track.src) continue;
                         const t0 = Date.now();
@@ -1857,7 +1871,8 @@ async function init() {
 
                 if (!dlState.canceled) {
                     writePlaylistFile(dir, sanitizeName(p.name), p.name, files);
-                    entry.name = `${p.name} (${files.length}/${p.entries.length} tracks)`;
+                    entry.name = `${p.name} (${files.length}/${p.entries.length} tracks` +
+                        (skipped ? `, ${skipped} not owned` : '') + ')';
                     prog(files.length ? 'completed' : 'interrupted', 100);
                 }
             } catch (err: any) {
@@ -2397,129 +2412,6 @@ async function init() {
 
     const sanitizeName = (x: string) => (x || '').replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) || 'untitled';
     let streamDlActive = false;
-    const startStreamDownload = async (req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }): Promise<{ ok: boolean; count?: number; error?: string }> => {
-        if (streamDlActive) return { ok: false, error: 'a download is already running' };
-        const rel = await bandcampApi.fetchReleaseForDownload(req);
-        if (!rel.ok) return { ok: false, error: rel.error };
-        streamDlActive = true;
-        
-        openDownloadsPanel();
-
-        const entryId = ++dlSeq;
-        const dlState = { canceled: false };
-        streamDownloads.set(entryId, dlState);
-
-        const entry: DlEntry = { id: entryId, name: `${rel.albumArtist} - ${rel.album}`, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
-        dlRegistry.unshift(entry);
-        
-        const prog = (state: string, percent: number, name: string) => {
-            entry.state = state;
-            entry.percent = Math.max(0, percent);
-            broadcastDownloads();
-        };
-        
-        void (async () => {
-            try {
-                const fileFmt = store.get('fileNameFmt', '{tracknum} {artist} - {title}') as string;
-                const folderFmt = store.get('folderNameFmt', '{artist}/{album}') as string;
-                const modifyTags = store.get('modifyTags', true) !== false;
-                // per-tag toggles + cover/playlist options (BandcampDownloader-style)
-                const tagOn = (k: string) => store.get(k, true) !== false;
-                const coverInTags = tagOn('coverInTags');
-                const coverInFolder = tagOn('coverInFolder');
-                const coverNameFmt = String(store.get('coverNameFmt', 'cover') || 'cover');
-                const playlistNameFmt = String(store.get('playlistNameFmt', '{album}') || '{album}');
-
-                const formatPath = (fmt: string) => {
-                    return (fmt || '').replace(/\{albumartist\}/gi, sanitizeName(rel.albumArtist))
-                                      .replace(/\{artist\}/gi, sanitizeName(rel.albumArtist))
-                                      .replace(/\{album\}/gi, sanitizeName(rel.album))
-                                      .replace(/\{year\}/gi, rel.year ? String(rel.year) : '');
-                };
-
-                const dir = path.join(getDownloadDir(), formatPath(folderFmt));
-                fs.mkdirSync(dir, { recursive: true });
-                entry.file = dir;
-                
-                let art: Buffer | null = null;
-                if (rel.artUrl && (coverInTags || coverInFolder)) {
-                    art = await bandcampApi.fetchBinary(rel.artUrl);
-                    if (art && art.length && coverInFolder) {
-                        try { fs.writeFileSync(path.join(dir, (sanitizeName(formatPath(coverNameFmt)) || 'cover') + '.jpg'), art); } catch { /* disk */ }
-                    }
-                }
-                
-                const files: { file: string; title: string; artist: string; duration: number }[] = [];
-                for (let i = 0; i < rel.tracks.length; i++) {
-                    if (dlState.canceled) {
-                        prog('cancelled', Math.round((i / rel.tracks.length) * 100), `${rel.album} (Cancelled)`);
-                        break;
-                    }
-
-                    const t = rel.tracks[i];
-                    prog('progressing', Math.round((i / rel.tracks.length) * 100), `${t.title} (${i + 1}/${rel.tracks.length})`);
-                    
-                    const t0 = Date.now();
-                    const buf = await bandcampApi.fetchBinary(t.stream);
-                    const dt = (Date.now() - t0) / 1000;
-                    if (buf && buf.length && dt > 0) {
-                        entry.speed = buf.length / dt;
-                        entry.receivedBytes += buf.length;
-                    }
-                    
-                    if (!buf || !buf.length) continue; 
-                    
-                    const formatFileName = (fmt: string, trackTitle: string, trackArtist: string, trackNum: string) => {
-                        let name = (fmt || '{tracknum} {artist} - {title}').replace(/\{albumartist\}/gi, sanitizeName(rel.albumArtist))
-                            .replace(/\{artist\}/gi, sanitizeName(trackArtist))
-                            .replace(/\{album\}/gi, sanitizeName(rel.album))
-                            .replace(/\{title\}/gi, sanitizeName(trackTitle))
-                            .replace(/\{year\}/gi, rel.year ? String(rel.year) : '')
-                            .replace(/\{tracknum\}/gi, trackNum.padStart(2, '0'));
-                        if (!name.toLowerCase().endsWith('.mp3')) name += '.mp3';
-                        return name;
-                    };
-
-                    const fileName = formatFileName(fileFmt, t.title, t.artist, String(t.trackNum));
-                    const file = path.join(dir, fileName);
-
-                    if (modifyTags) {
-                        // an unticked tag simply isn't written
-                        const tag = buildId3v23({
-                            title: tagOn('tagTitle') ? t.title : '',
-                            artist: tagOn('tagArtist') ? t.artist : '',
-                            albumArtist: tagOn('tagAlbumArtist') ? rel.albumArtist : '',
-                            album: tagOn('tagAlbum') ? rel.album : '',
-                            trackNum: tagOn('tagTrackNum') ? t.trackNum : 0,
-                            trackTotal: tagOn('tagTrackNum') ? rel.tracks.length : undefined,
-                            year: tagOn('tagYear') ? rel.year : 0,
-                            lyrics: tagOn('tagLyrics') ? t.lyrics : '',
-                            art: coverInTags ? (art || undefined) : undefined,
-                        });
-                        fs.writeFileSync(file, Buffer.concat([tag, buf]));
-                    } else {
-                        fs.writeFileSync(file, buf);
-                    }
-
-                    files.push({ file, title: t.title, artist: t.artist, duration: t.duration });
-                    await new Promise((res) => setTimeout(res, 250)); // gentle on the cdn
-                }
-
-                if (!dlState.canceled) {
-                    writePlaylistFile(dir, sanitizeName(formatPath(playlistNameFmt)) || sanitizeName(rel.album), rel.album, files);
-                    prog(files.length ? 'completed' : 'interrupted', 100, `${rel.album} (${files.length}/${rel.tracks.length} tracks)`);
-                }
-            } catch (err: any) {
-                if (devMode) console.log('[bcrpc] stream download FAILED ' + (err && (err.message || err)));
-                prog('interrupted', 0, rel.album);
-            } finally {
-                streamDownloads.delete(entryId);
-                streamDlActive = false;
-                entry.speed = 0;
-            }
-        })();
-        return { ok: true, count: rel.tracks.length };
-    };
     // playlist file in the chosen settings format, next to the tracks
     function writePlaylistFile(dir: string, baseName: string, album: string, files: { file: string; title: string; artist: string; duration: number }[]): void {
         const fmt = String(store.get('dlPlaylistFormat', 'm3u'));
@@ -2540,14 +2432,12 @@ async function init() {
         }
         try { fs.writeFileSync(path.join(dir, (baseName || sanitizeName(album)) + '.' + fmt), out, 'utf8'); } catch { /* disk */ }
     }
-    ipcMain.handle('download:release', (_e, req: { url?: string; tralbumId?: string; tralbumType?: TralbumType; bandId?: string }) => startStreamDownload(req || {}));
-
     // ownership check for the on-page download button: owned collection items
     // carry their bandcamp redownload page url
     ipcMain.handle('release:download-info', (_e, req: { tralbumId?: string; tralbumType?: string }) => {
         const id = toIdStr(req?.tralbumId);
         const type = req?.tralbumType === 't' ? 't' : 'a';
-        if (!id) return { owned: false };
+        if (!id || !ownsRelease(type, id)) return { owned: false };
         const hit = collectionItemsDisk.get().find((c: any) => !c.wish && c.tralbumType === type && c.tralbumId === id && c.downloadUrl);
         return hit ? { owned: true, downloadUrl: hit.downloadUrl } : { owned: false };
     });
@@ -2853,8 +2743,6 @@ async function init() {
             const tmpl: Electron.MenuItemConstructorOptions[] = [];
             if (linkIsRelease) tmpl.push({ label: 'Add to queue', click: () => enqueueFromUrl(link) });
             else if (pageIsRelease) tmpl.push({ label: 'Add this release to queue', click: () => enqueueFromUrl(pageUrl) });
-            if (linkIsRelease) tmpl.push({ label: 'Download release (mp3-128)', click: () => { void startStreamDownload({ url: link }); } });
-            else if (pageIsRelease) tmpl.push({ label: 'Download this release (mp3-128)', click: () => { void startStreamDownload({ url: pageUrl }); } });
             if (link) {
                 if (tmpl.length) tmpl.push({ type: 'separator' });
                 tmpl.push({ label: 'Copy link', click: () => { clipboard.writeText(link); pageToast('link copied'); } });
