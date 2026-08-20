@@ -1124,6 +1124,16 @@ async function init() {
                     if (fresh.length) {
                         const freshKeys = new Set<string>(fresh.map((c) => c.tralbumType + c.tralbumId));
                         const merged = [...fresh, ...cached.filter((c: any) => !freshKeys.has(c.tralbumType + c.tralbumId))];
+                        // safety net for caches written before wish was explicit:
+                        // if a key somehow exists twice, the owned copy wins
+                        const byKey = new Map<string, any>();
+                        for (const it of merged) {
+                            const k = it.tralbumType + it.tralbumId;
+                            const prev = byKey.get(k);
+                            if (!prev || (prev.wish === true && it.wish !== true)) byKey.set(k, it);
+                        }
+                        merged.length = 0;
+                        merged.push(...byKey.values());
                         const total = merged.length;
                         sendCollItems(fresh, total, total);
                         collectionItemsDisk.replace(merged);

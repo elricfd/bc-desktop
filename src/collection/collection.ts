@@ -55,12 +55,20 @@ async function load(): Promise<void> {
     ipcRenderer.send('collection:log', 'fetch start');
     
     const onItems = (_e: unknown, p: { items: CollectionItem[]; soFar: number; total: number }) => {
+        let graduated = false; // a wishlist item turned into an owned one
         for (const it of p?.items || []) {
             const key = it.tralbumType + it.tralbumId;
             const existing = itemKeys.get(key);
             if (existing !== undefined) {
-                // wishlist item got purchased (or metadata refreshed): update in place
-                items[existing] = { ...items[existing], ...it };
+                // wishlist item got purchased (or metadata refreshed): update in
+                // place. the owned copy must be able to CLEAR the wish flag, so
+                // it is recomputed rather than left to the spread.
+                const wasWish = items[existing].wish === true;
+                const merged = { ...items[existing], ...it };
+                merged.wish = it.wish === true;
+                if (merged.downloadUrl) merged.wish = false; // purchased outright
+                items[existing] = merged;
+                if (wasWish !== (merged.wish === true)) graduated = true;
                 continue;
             }
             itemKeys.set(key, items.length);
@@ -69,7 +77,9 @@ async function load(): Promise<void> {
         if (p?.total) expected = p.total;
         
         // CRITICAL: Soft render. Only append new items to avoid destroying the open tracklist.
-        softRender();
+        // a graduation changes an EXISTING card (heart badge, scope), which the
+        // append-only path would never repaint - rebuild in that case.
+        if (graduated) forceRender(); else softRender();
     };
     
     ipcRenderer.on('collection:items', onItems);
@@ -1084,7 +1094,13 @@ ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
     for (const it of p?.items || []) {
         const key = it.tralbumType + it.tralbumId;
         const existing = itemKeys.get(key);
-        if (existing !== undefined) { items[existing] = { ...items[existing], ...it }; continue; }
+        if (existing !== undefined) {
+            const merged = { ...items[existing], ...it };
+            merged.wish = it.wish === true;
+            if (merged.downloadUrl) merged.wish = false;
+            items[existing] = merged;
+            continue;
+        }
         itemKeys.set(key, items.length);
         items.push(it);
         added++;
