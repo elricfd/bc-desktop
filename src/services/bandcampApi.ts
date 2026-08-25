@@ -815,11 +815,15 @@ export class BandcampApi {
     // some formats aren't encoded yet; the download url has a sibling statdownload
     // endpoint that reports ready + the final file url. poll it, then fall back to
     // the raw url (bandcamp also streams the zip directly once prepared).
-    async prepareDownload(formatUrl: string): Promise<string> {
+    async prepareDownload(
+        formatUrl: string,
+        opts?: { onWait?: (secondsWaited: number) => void; canceled?: () => boolean }
+    ): Promise<string> {
         const session = this.getSession();
         if (!session || !formatUrl) return formatUrl;
         const statUrl = formatUrl.replace('/download/', '/statdownload/') + '&.vrs=1&.rand=' + Math.floor(Math.random() * 1e9);
         for (let i = 0; i < 45; i++) {
+            if (opts?.canceled?.()) return '';
             try {
                 const r = await session.fetch(statUrl, { credentials: 'include' } as any);
                 const text = await r.text();
@@ -833,6 +837,7 @@ export class BandcampApi {
                 // keep polling
             }
             await new Promise((res) => setTimeout(res, 2000));
+            opts?.onWait?.((i + 1) * 2);
         }
         return formatUrl;
     }

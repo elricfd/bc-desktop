@@ -35,9 +35,14 @@
         .st { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #848079; flex-shrink: 0; }
         .st.completed { color: #5fb878; }
         .st.progressing { color: #1da0c3; }
+        /* waiting on bandcamp to encode the file - not stalled, just slow */
+        .st.preparing { color: #d8a33c; }
         .st.interrupted, .st.cancelled { color: #d66; }
         .track { flex: 1; height: 4px; background: #2a2e30; border-radius: 2px; overflow: hidden; }
         .track > div { height: 100%; background: #1da0c3; border-radius: 2px; transition: width 0.2s ease; }
+        /* indeterminate sweep while bandcamp prepares the file */
+        .track.prep > div { width: 40%; background: #d8a33c; animation: prepsweep 1.1s ease-in-out infinite; }
+        @keyframes prepsweep { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
         .state { padding: 30px 12px; color: #848079; font-size: 12px; text-align: center; }
         .cancel-btn {
             background: transparent; color: #d66; border: none; font-size: 13px;
@@ -82,12 +87,13 @@
                 row.className = 'row' + (d.state === 'completed' && d.file ? ' openable' : '');
                 const pct = Math.max(0, Math.min(100, d.percent || 0));
                 
-                const cancelBtn = d.state === 'progressing' ? `<button class="cancel-btn" data-id="${d.id}" title="Stop Download"><svg viewBox="0 0 24 24" fill="none" style="width:11px;height:11px;display:block"><path d="M6 6L18 18M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : '';
+                const cancelBtn = (d.state === 'progressing' || d.state === 'preparing') ? `<button class="cancel-btn" data-id="${d.id}" title="Stop Download"><svg viewBox="0 0 24 24" fill="none" style="width:11px;height:11px;display:block"><path d="M6 6L18 18M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>` : '';
 
                 row.innerHTML =
                     '<div class="name">' + esc(d.name) + '</div>' +
                     '<div class="sub"><span class="st ' + esc(d.state) + '">' + esc(d.state === 'progressing' ? pct + '%' : d.state) + '</span>' +
                     (d.state === 'progressing' ? '<div class="track"><div style="width:' + pct + '%"></div></div>' : '') +
+                    (d.state === 'preparing' ? '<div class="track prep"><div></div></div>' : '') +
                     cancelBtn + '</div>';
 
                 if (d.state === 'completed' && d.file) {
