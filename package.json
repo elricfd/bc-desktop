@@ -76,7 +76,7 @@
         "cpx2": "^8.0.0",
         "electron": "^43.0.0",
         "electron-builder": "^26.7.0",
-        "typescript": "^5.9.0"
+        "typescript": "^5.9.3"
     },
     "overrides": {
         "@discordjs/rest": {
