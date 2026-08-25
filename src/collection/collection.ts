@@ -152,13 +152,16 @@ function sortedFiltered(): CollectionItem[] {
 
 // terse status line: "importing x/y" while loading, "indexing x/y" while the
 // index builds, else just the release count (filtered as "n / total")
-function updateHeaderCount(): void {
+// pass the already-filtered list when the caller has one: sortedFiltered() is
+// a full filter + sort over the whole collection (thousands of items) and the
+// render path used to run it twice for every batch that streamed in.
+function updateHeaderCount(precomputed?: CollectionItem[]): void {
     if (loading) { countEl.textContent = `importing ${items.length}/${expected || '?'}`; return; }
     if (indexing) {
         countEl.textContent = `indexing ${searchIndex.size}/${items.length}` + (indexStatus ? ` (${indexStatus})` : '');
         return;
     }
-    const list = sortedFiltered();
+    const list = precomputed || sortedFiltered();
     const total = list.length === items.length ? String(items.length) : `${list.length} / ${items.length}`;
     countEl.textContent = total + ' releases';
 }
@@ -305,7 +308,7 @@ function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
 // CRITICAL FIX: Only appends new items during load so the open tracklist isn't destroyed
 function softRender(): void {
     const list = sortedFiltered();
-    updateHeaderCount();
+    updateHeaderCount(list);
 
     if (viewMode === 'list') { renderList(list); return; }
 

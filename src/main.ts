@@ -206,7 +206,13 @@ function localAlbumKey(t: { albumArtist: string; artist: string; album: string; 
     const h = crypto.createHash('md5').update(((t.albumArtist || t.artist) + '\0' + t.album).toLowerCase()).digest('hex').slice(0, 16);
     return LOCAL_PREFIX + h;
 }
+// grouping the whole local library is O(n log n) and every caller used to redo
+// it (collection fetch, tracklist opens, index runs, scans). cache it against
+// the library array identity + length so it rebuilds only after a real change.
+let localGroupsCache: { src: LocalTrackT[]; len: number; map: Map<string, LocalTrackT[]> } | null = null;
 function localGroups(): Map<string, LocalTrackT[]> {
+    const lib = localFilesDisk.get();
+    if (localGroupsCache && localGroupsCache.src === lib && localGroupsCache.len === lib.length) return localGroupsCache.map;
     const groups = new Map<string, LocalTrackT[]>();
     for (const t of localFilesDisk.get()) {
         const k = localAlbumKey(t);
@@ -485,12 +491,19 @@ function getHeaderButtons(): Record<string, boolean> {
     }
     return out;
 }
-// covers live under the user-chosen cache location (settings), else app data
+// covers live under the user-chosen cache location (settings), else app data.
+// this used to re-read the settings store, stat the custom path AND mkdir on
+// every call - and it is called once per collection item, i.e. thousands of
+// times per send, all of it blocking the main process. resolve once; the
+// settings picker invalidates it.
+let artDirMemo = '';
 function artCacheDir(): string {
+    if (artDirMemo) return artDirMemo;
     const custom = store.get('cacheDir', '') as string;
     const base = custom && typeof custom === 'string' && fs.existsSync(custom) ? custom : app.getPath('userData');
     const d = path.join(base, 'art-cache');
     try { fs.mkdirSync(d, { recursive: true }); } catch { /* exists */ }
+    artDirMemo = d;
     return d;
 }
 // total bytes held by the release cache (covers on disk + the metadata stores)
@@ -508,10 +521,26 @@ function cacheSizeBytes(): number {
 function artCachePath(type: string, id: string): string {
     return path.join(artCacheDir(), type + toIdStr(id) + '.jpg');
 }
+// one directory listing serves every lookup: the old per-item existsSync was
+// a synchronous syscall for each of thousands of collection items.
+let artNamesMemo: { dir: string; names: Set<string> } | null = null;
+function artCacheNames(): Set<string> {
+    const dir = artCacheDir();
+    if (artNamesMemo && artNamesMemo.dir === dir) return artNamesMemo.names;
+    let names: Set<string>;
+    try { names = new Set(fs.readdirSync(dir)); } catch { names = new Set(); }
+    artNamesMemo = { dir, names };
+    return names;
+}
+/** a freshly mirrored cover is usable immediately, without re-listing. */
+function artCacheRemember(file: string): void {
+    if (artNamesMemo) artNamesMemo.names.add(path.basename(file));
+}
+function invalidateArtCache(): void { artDirMemo = ''; artNamesMemo = null; }
 function localArtUrl(type: string, id: string): string {
-    const p = artCachePath(type, id);
-    try { if (fs.existsSync(p)) return pathToFileURL(p).href; } catch { /* keep remote */ }
-    return '';
+    const name = type + toIdStr(id) + '.jpg';
+    if (!artCacheNames().has(name)) return '';
+    try { return pathToFileURL(path.join(artCacheDir(), name)).href; } catch { return ''; }
 }
 
 // persist a resolved release year so year-sort enrichment is a one-time cost
@@ -1395,9 +1424,9 @@ async function init() {
                 const art = String(r.art || '');
                 if (!art.startsWith('https://')) continue;
                 const ap = artCachePath(r.tralbumType, r.tralbumId);
-                if (fs.existsSync(ap)) continue;
+                if (artCacheNames().has(path.basename(ap))) continue;
                 const buf = await bandcampApi.fetchBinary(art);
-                if (buf && buf.length) { try { fs.writeFileSync(ap, buf); } catch { /* disk */ } }
+                if (buf && buf.length) { try { fs.writeFileSync(ap, buf); artCacheRemember(ap); } catch { /* disk */ } }
                 await idxSleep(60);
             }
         } finally {
@@ -2273,11 +2302,22 @@ async function init() {
             eta = Math.ceil(totalRemainingBytes / totalSpeed);
         }
 
-        updateDownloadsHeight(); // Check bounds before drawing
-
+        // NOTE: no setBounds here - the renderer measures its real content and
+        // asks for a height via downloads:resize. running an estimate on every
+        // progress tick just fought that measurement (and moved the window
+        // dozens of times a second).
         downloadsWin.webContents.send('downloads:list', {
             items: dlRegistry, activeCount, overallPercent, eta
         });
+    };
+
+    // progress events fire many times a second per download; the panel cannot
+    // paint that fast and every call serializes the whole registry over ipc.
+    // coalesce to ~10/s, with state changes going out immediately.
+    let dlBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+    const broadcastDownloadsSoon = () => {
+        if (dlBroadcastTimer) return;
+        dlBroadcastTimer = setTimeout(() => { dlBroadcastTimer = null; broadcastDownloads(); }, 100);
     };
 
     const nativeDownloads = new Map<number, Electron.DownloadItem>();
@@ -2341,7 +2381,7 @@ async function init() {
 
     ipcMain.on('downloads:cancel', (_e, id: number) => {
         const entry = dlRegistry.find(d => d.id === id);
-        if (entry && entry.state === 'progressing') {
+        if (entry && (entry.state === 'progressing' || entry.state === 'preparing')) {
             entry.state = 'cancelled';
             if (nativeDownloads.has(id)) {
                 nativeDownloads.get(id)!.cancel();
@@ -2359,9 +2399,20 @@ async function init() {
 
         const name = item.getFilename();
         try { item.setSavePath(path.join(getDownloadDir(), name)); } catch { /* let electron pick */ }
-        const entryId = ++dlSeq;
-        const entry: DlEntry = { id: entryId, name, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
-        dlRegistry.unshift(entry);
+        // a row we already showed while bandcamp encoded the file takes over here
+        // rather than leaving a stale "preparing" line next to the real transfer
+        const claimedId = awaitingTransfer.shift();
+        const claimed = claimedId ? dlRegistry.find((d) => d.id === claimedId && d.state === 'preparing') : undefined;
+        const entryId = claimed ? claimed.id : ++dlSeq;
+        const entry: DlEntry = claimed || { id: entryId, name, state: 'progressing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
+        if (claimed) {
+            entry.name = name;
+            entry.state = 'progressing';
+            entry.at = Date.now();
+            entry.lastTime = Date.now();
+        } else {
+            dlRegistry.unshift(entry);
+        }
         nativeDownloads.set(entryId, item);
 
         const send = (o: any) => {
@@ -2384,8 +2435,11 @@ async function init() {
             entry.receivedBytes = item.getReceivedBytes();
             entry.totalBytes = item.getTotalBytes();
             entry.percent = entry.totalBytes > 0 ? Math.floor((entry.receivedBytes / entry.totalBytes) * 100) : entry.percent;
-            
-            send({ name, percent: entry.percent, state: 'progressing' });
+
+            if (headerView && !headerView.webContents.isDestroyed()) {
+                headerView.webContents.send('download:progress', { name, percent: entry.percent, state: 'progressing' });
+            }
+            broadcastDownloadsSoon();
         });
         
         item.on('done', (_ev, state) => {
@@ -2464,14 +2518,51 @@ async function init() {
     });
 
     // prepare (if needed) & start a download of a chosen format url
+    // ids of prepared downloads whose transfer hasn't started yet (claimed by
+    // will-download so the placeholder row becomes the real one)
+    const awaitingTransfer: number[] = [];
     ipcMain.handle('download:start', async (_e, formatUrl: string) => {
+        // bandcamp encodes the requested format on demand, which can take a
+        // while. show the panel with a live "preparing" row immediately so the
+        // wait is visible instead of looking like nothing happened.
+        openDownloadsPanel();
+        const entryId = ++dlSeq;
+        const entry: DlEntry = { id: entryId, name: 'Preparing on Bandcamp...', state: 'preparing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
+        dlRegistry.unshift(entry);
+        const prep = { canceled: false };
+        streamDownloads.set(entryId, prep); // reuses the panel's cancel plumbing
+        broadcastDownloads();
         try {
-            const finalUrl = await bandcampApi.prepareDownload(formatUrl);
+            const finalUrl = await bandcampApi.prepareDownload(formatUrl, {
+                onWait: (secs) => {
+                    if (prep.canceled || entry.state !== 'preparing') return;
+                    entry.name = `Preparing on Bandcamp... (${secs}s)`;
+                    broadcastDownloads();
+                },
+                canceled: () => prep.canceled,
+            });
+            if (prep.canceled) return { ok: false, error: 'cancelled' };
+            if (!finalUrl) { entry.state = 'interrupted'; broadcastDownloads(); return { ok: false, error: 'cancelled' }; }
+            awaitingTransfer.push(entryId);
             session.downloadURL(finalUrl);
+            // never leave a ghost row if bandcamp never starts the transfer
+            setTimeout(() => {
+                if (entry.state !== 'preparing') return;
+                const i = awaitingTransfer.indexOf(entryId);
+                if (i !== -1) awaitingTransfer.splice(i, 1);
+                entry.state = 'interrupted';
+                entry.name = 'Bandcamp never started the transfer';
+                broadcastDownloads();
+            }, 90000);
             if (devMode) console.log('[bcrpc] download:start ' + finalUrl.slice(0, 70));
             return { ok: true };
         } catch (err: any) {
+            entry.state = 'interrupted';
+            entry.name = String(err?.message || 'download failed');
+            broadcastDownloads();
             return { ok: false, error: err?.message || 'failed' };
+        } finally {
+            streamDownloads.delete(entryId);
         }
     });
 
@@ -2532,6 +2623,7 @@ async function init() {
         });
         if (res.canceled || !res.filePaths.length) return { ok: false, dir: current };
         store.set('cacheDir', res.filePaths[0]);
+        invalidateArtCache();
         return { ok: true, dir: res.filePaths[0] };
     });
     ipcMain.handle('settings:cache-info', () => ({
