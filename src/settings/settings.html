@@ -29,6 +29,9 @@
             display: flex; align-items: center; justify-content: center; cursor: pointer;
         }
         .titlebar .winclose:hover { background: #e81123; color: #fff; }
+        /* mac: frameless windows have ~10px rounded corners; a boxy hover in that
+           corner clashes, so use a small inset circle instead */
+        body.mac .titlebar .winclose { width: 22px; height: 22px; margin-right: 4px; border-radius: 50%; font-size: 12px; }
         .body { padding: 22px; }
         h1 { font-size: 16px; margin-bottom: 4px; }
         .hint { color: #848079; font-size: 11px; margin-bottom: 18px; line-height: 1.5; }
@@ -284,6 +287,7 @@
         }, true);
 
         // custom titlebar close (frameless window)
+        if (typeof process !== 'undefined' && process.platform === 'darwin') document.body.classList.add('mac');
         $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
 
         const wbIcons = {
