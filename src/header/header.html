@@ -43,6 +43,15 @@
             padding-left: 8px;
             gap: 4px;
         }
+        /* mac: native traffic lights sit top-left (see trafficLightPosition), so
+           clear them and drop our own min/max/close */
+        body.mac .nav-controls { padding-left: 76px; }
+        body.mac .window-controls button.control { display: none; }
+        /* mac: back/forward live at the far right, spaced away from the other icons */
+        body.mac .nav-arrows {
+            display: flex; align-items: center; gap: 4px; height: 100%;
+            margin-left: 18px; padding-right: 8px; -webkit-app-region: no-drag;
+        }
 
         /* url bar wrapper holds the input + the refresh button on its right */
         .urlwrap {
@@ -210,6 +219,14 @@
 
 <script>
     const { ipcRenderer } = require('electron');
+    if (typeof process !== 'undefined' && process.platform === 'darwin') {
+        document.body.classList.add('mac');
+        const arrows = document.createElement('div');
+        arrows.className = 'nav-arrows';
+        arrows.appendChild(document.getElementById('btn-back'));
+        arrows.appendChild(document.getElementById('btn-forward'));
+        document.body.appendChild(arrows);
+    }
 
     document.getElementById('btn-back').onclick = () => ipcRenderer.send('app:back');
     document.getElementById('btn-forward').onclick = () => ipcRenderer.send('app:forward');
@@ -295,9 +312,8 @@
     });
     ipcRenderer.on('nav:url', (_e, url) => { if (!urlFocused) urlBar.value = url || ''; });
 
-    // media hotkeys while the header is focused (space play/pause, ←/→ scrub,
-    // shift+←/→ prev/next, shift+↑/↓ volume) forwarded to the player via main.
-    // NOTE: keep in sync with preload.ts / player.ts / collection.ts.
+    // media hotkeys while the header is focused, forwarded to the player.
+    // keep in sync with preload.ts / player.ts / collection.ts.
     function mediaHotkeyOf(e) {
         const t = e.target, tag = t ? t.tagName : '';
         if (t && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';

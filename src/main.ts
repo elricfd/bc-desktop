@@ -50,10 +50,8 @@ const LIGHT_CSS = `
     body.home .editorial-recommendations-banner { display: block !important; }
 `;
 
-// per-navigation theme css. the html-bg / body-opacity cloak is intentionally
-// injected here too (webContents-level, applies very early per navigation) AND in
-// the preload - dropping either one lets a flash of light-mode bandcamp show on
-// page change, so both are kept on purpose.
+// per-navigation theme css. the cloak is injected here AND in the preload -
+// dropping either one lets a flash of light-mode bandcamp show on page change.
 const ANTI_FLASH_CSS = `
     html { background-color: #181a1b !important; }
     html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }
@@ -101,13 +99,8 @@ const ANTI_FLASH_CSS = `
 
 const store = new Store({ clearInvalidConfig: true });
 
-// --- big on-disk caches -------------------------------------------------------
-// the release index / collection listing / year cache used to live in
-// electron-store, but conf re-reads AND re-writes the entire config.json
-// SYNCHRONOUSLY on every access - once these caches grew to megabytes the main
-// process spent seconds blocked on json i/o and the window went "not responding"
-// (looked like a crash). they now live in their own files with in-memory state
-// and debounced async writes.
+// --- big on-disk caches: these outgrew electron-store (conf rewrites config.json
+// synchronously per access), so they live in their own files with debounced writes.
 class DiskCache<T> {
     private data: T;
     private timer: ReturnType<typeof setTimeout> | null = null;
@@ -133,10 +126,8 @@ class DiskCache<T> {
     sizeBytes(): number { try { return fs.statSync(this.file).size; } catch { return 0; } }
 }
 type IndexCacheEntryT = { g: string[]; t: [string, number][]; y: number; a?: string };
-// custom playlists built from the collection view. entries are fully
-// materialized tracks (display metadata + resolver handle); stream urls are
-// NOT stored - they expire, so playback resolves them lazily like any queued
-// collection track (player:resolve-stream).
+// custom playlists built from the collection view. entries are materialized tracks;
+// stream urls expire, so playback resolves them lazily (player:resolve-stream).
 type PlaylistEntryT = {
     id: string; title: string; artist: string; album: string; art: string;
     duration: number; url: string; bandId: string; tralbumId: string; tralbumType: TralbumType;
@@ -183,16 +174,10 @@ function initDiskCaches(): void {
     } catch { /* start with fresh caches */ }
 }
 
-// --- local files library helpers ---------------------------------------------
-// local pseudo-releases live beside bandcamp items in the collection view; their
-// ids are namespaced 'local:…' and every resolver branches on that prefix BEFORE
-// any bandcamp id math (toIdStr would mangle them).
+// --- local files library helpers: ids are namespaced 'local:…'; every resolver
+// must branch on that prefix BEFORE bandcamp id math (toIdStr would mangle them).
 const LOCAL_PREFIX = 'local:';
-/**
- * do we OWN this release? only purchased items carry a bandcamp redownload
- * page url in the collection listing. downloading is gated on this: the app
- * never pulls audio for releases the user hasn't bought.
- */
+/** owned = collection item with a redownload url; all downloading is gated on this. */
 function ownsRelease(type: unknown, id: unknown): boolean {
     const tid = toIdStr(id);
     if (!tid) return false;
@@ -206,9 +191,7 @@ function localAlbumKey(t: { albumArtist: string; artist: string; album: string; 
     const h = crypto.createHash('md5').update(((t.albumArtist || t.artist) + '\0' + t.album).toLowerCase()).digest('hex').slice(0, 16);
     return LOCAL_PREFIX + h;
 }
-// grouping the whole local library is O(n log n) and every caller used to redo
-// it (collection fetch, tracklist opens, index runs, scans). cache it against
-// the library array identity + length so it rebuilds only after a real change.
+// grouped local library memoized against array identity + length.
 let localGroupsCache: { src: LocalTrackT[]; len: number; map: Map<string, LocalTrackT[]> } | null = null;
 function localGroups(): Map<string, LocalTrackT[]> {
     const lib = localFilesDisk.get();
@@ -285,6 +268,7 @@ let isQuitting = false;
 
 const devMode = process.argv.includes('--dev');
 const isWin = platform() === 'win32';
+const isMac = platform() === 'darwin';
 const globalUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
 app.userAgentFallback = globalUserAgent;
 
@@ -294,9 +278,7 @@ if (!gotTheLock) {
     process.exit(0);
 }
 
-// relaunching the app while it's hidden to tray (clicking the desktop/taskbar
-// icon) fires this in the running instance - bring the window back instead of
-// silently doing nothing.
+// second-instance launch while hidden to tray: bring the window back.
 function showMainWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -335,24 +317,47 @@ function adjustContentViews() {
 }
 
 function setupTray() {
-    const iconPath = path.join(__dirname, '../assets/bandcamp-button-circle-black-64.png');
+    // macOS menu bar wants a 16pt template image (trayTemplate.png + @2x); the 64px
+    // app icon rendered at its natural size there
+    const iconPath = path.join(__dirname, isMac ? '../assets/trayTemplate.png' : '../assets/bandcamp-button-circle-black-64.png');
     tray = new Tray(nativeImage.createFromPath(iconPath));
     tray.setToolTip('Bandcamp Desktop');
     // right click menu is only reliable way to quit when close to tray is on
-    tray.setContextMenu(Menu.buildFromTemplate([
+    const menu = Menu.buildFromTemplate([
         { label: 'Show Bandcamp', click: () => { mainWindow.show(); mainWindow.focus(); } },
         { label: 'Hide to tray', click: () => mainWindow.hide() },
         { type: 'separator' },
         { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
-    ]));
-    tray.on('click', () => {
-        if (mainWindow.isVisible()) mainWindow.hide();
-        else { mainWindow.show(); mainWindow.focus(); }
-    });
+    ]);
+    const toggle = () => {
+        // mac: a visible-but-background window comes forward instead of hiding
+        const hideIt = isMac ? (mainWindow.isVisible() && mainWindow.isFocused()) : mainWindow.isVisible();
+        if (hideIt) mainWindow.hide();
+        else showMainWindow();
+    };
+    if (isMac) {
+        // setContextMenu makes a LEFT click open the menu on macOS (no click event),
+        // so toggling took two clicks; keep the menu on right click only
+        tray.on('click', toggle);
+        tray.on('right-click', () => tray?.popUpContextMenu(menu));
+    } else {
+        tray.setContextMenu(menu);
+        tray.on('click', toggle);
+    }
+}
+
+// child popups of a fullscreen mac window otherwise land on another Space (invisible)
+function keepChildVisible(win: BrowserWindow): void {
+    if (!isMac || !mainWindow || mainWindow.isDestroyed()) return;
+    try { if (mainWindow.isFullScreen()) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch { /* ignore */ }
 }
 
 function openSettings() {
     if (settingsWindow && !settingsWindow.isDestroyed()) {
+        // focus() alone does nothing for a window that got hidden with its parent
+        if (settingsWindow.isMinimized()) settingsWindow.restore();
+        if (!settingsWindow.isVisible()) settingsWindow.show();
+        keepChildVisible(settingsWindow);
         settingsWindow.focus();
         return;
     }
@@ -369,6 +374,7 @@ function openSettings() {
         frame: false,
         webPreferences: { nodeIntegration: true, contextIsolation: false }
     });
+    keepChildVisible(settingsWindow);
     settingsWindow.loadFile(path.join(__dirname, 'settings', 'settings.html'));
     settingsWindow.on('closed', () => { settingsWindow = null; });
 }
@@ -394,9 +400,8 @@ function closeSearch() {
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', false);
 }
 
-// external (non-bandcamp) hosts artists link to that should pop a separate window
-// instead of hijacking the main view. kept to social/promo sites so checkout &
-// login redirects (paypal, stripe, google, facebook oauth…) still work in-app.
+// external hosts that pop a separate window; kept small so checkout/oauth
+// redirects (paypal, stripe, google, facebook) stay in-app.
 const SOCIAL_HOSTS = [
     'instagram.com', 'twitter.com', 'x.com', 'facebook.com', 'youtube.com', 'youtu.be',
     'tiktok.com', 'spotify.com', 'open.spotify.com', 'soundcloud.com', 'music.apple.com',
@@ -418,9 +423,8 @@ function getTheme(): 'dark' | 'light' {
     return store.get('theme', 'dark') === 'light' ? 'light' : 'dark';
 }
 
-// artist / label pages (subdomains & bandcamp-pro custom domains) as opposed to the
-// core app pages (bandcamp.com, the daily). used by the "don't darken artist pages"
-// option so their custom themes show through.
+// artist/label pages (subdomains & custom domains) vs core app pages,
+// for the "don't darken artist pages" option.
 function isArtistPage(url: string): boolean {
     try {
         const h = new URL(url).hostname.toLowerCase();
@@ -437,9 +441,8 @@ function isPlaylistPage(url: string): boolean {
     } catch { return false; }
 }
 
-// effective theme for a specific page: dark everywhere, except artist pages are
-// left light (their custom look) unless the user opted into darkening them,
-// and playlist pages which are natively dark already.
+// effective theme per page: dark, except artist pages (unless opted in)
+// and natively-dark playlist pages.
 function themeForUrl(url: string): 'dark' | 'light' {
     if (getTheme() === 'light') return 'light';
     if (isPlaylistPage(url)) return 'light';
@@ -450,10 +453,8 @@ function themeForUrl(url: string): 'dark' | 'light' {
 // opt-in on-disk release cache: covers + the release index (tracklists, tags,
 // album info) + the collection listing itself. audio is never cached.
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
-// which window-bar controls are visible (min/max/close/settings are not optional).
-// home defaults hidden (long-standing preference); everything else shown.
-// customizable app shortcuts (settings -> Keybinds). matched in main via
-// before-input-event on every view, so they work wherever focus sits.
+// which window-bar controls are visible; home defaults hidden.
+// app shortcuts (settings -> Keybinds), matched via before-input-event on every view.
 const SHORTCUT_DEFAULTS: Record<string, string> = {
     collection: 'Ctrl+Shift+C',
     feed: 'Ctrl+Shift+F',
@@ -491,11 +492,8 @@ function getHeaderButtons(): Record<string, boolean> {
     }
     return out;
 }
-// covers live under the user-chosen cache location (settings), else app data.
-// this used to re-read the settings store, stat the custom path AND mkdir on
-// every call - and it is called once per collection item, i.e. thousands of
-// times per send, all of it blocking the main process. resolve once; the
-// settings picker invalidates it.
+// covers dir, resolved once (used to re-read settings + stat + mkdir per
+// collection item, thousands of blocking calls per send); picker invalidates.
 let artDirMemo = '';
 function artCacheDir(): string {
     if (artDirMemo) return artDirMemo;
@@ -597,9 +595,8 @@ async function init() {
     lastfmService = new LastfmService(store);
     bandcampApi = new BandcampApi(() => (contentView ? contentView.webContents.session : null));
 
-    // surface bandcamp's HTTP 429 throttling to the user (previously only visible
-    // in the devtools console). our own styled window, not a native dialog; shown
-    // at most once per session; "Don't show again" persists the opt-out.
+    // surface bandcamp's HTTP 429 throttling in our own styled window, at most
+    // once per session; "Don't show again" persists the opt-out.
     let notice429Shown = false;
     let notice429Win: BrowserWindow | null = null;
     bandcampApi.on429 = () => {
@@ -612,6 +609,7 @@ async function init() {
                 backgroundColor: '#181a1b', // opaque: transparent windows are crash-prone on some setups
                 webPreferences: { nodeIntegration: true, contextIsolation: false },
             });
+            keepChildVisible(notice429Win);
             notice429Win.loadFile(path.join(__dirname, 'notice', 'notice429.html'));
             notice429Win.on('closed', () => { notice429Win = null; });
         } catch { notice429Win = null; }
@@ -633,6 +631,7 @@ async function init() {
         show: false,
         frame: false,
         titleBarStyle: 'hidden',
+        ...(isMac ? { trafficLightPosition: { x: 12, y: 13 } } : {}),
         webPreferences: { nodeIntegration: false, contextIsolation: true }
     });
 
@@ -686,9 +685,8 @@ async function init() {
     // shortcuts work no matter which pane has focus
     for (const v of [headerView, playerView, collectionView, feedView]) wireShortcutsOn(v.webContents);
 
-    // opt-in (settings, off by default): pre-fetch the collection in the background
-    // right after startup so opening the view is instant. small delay so the fetch
-    // doesn't compete with the initial page load for bandwidth/session cookies.
+    // opt-in (off by default): pre-fetch the collection shortly after startup
+    // so opening the view is instant.
     collectionView.webContents.once('did-finish-load', () => {
         if (store.get('autoLoadCollection', false) !== true) return;
         setTimeout(() => {
@@ -722,7 +720,8 @@ async function init() {
                (url.includes('.m3u8') && (url.includes('sndcdn') || url.includes('soundcloud')));
     };
 
-    // identify which track trapped stream url is for (token query param or numeric id in /stream/.../mp3-128/<id> path) so throttle below can dedupe by track rather than exact url (stream urls carry rotating tokens)
+    // which track a trapped stream url is for, so the throttle can dedupe
+// by track (urls carry rotating tokens).
     const streamTrackId = (url: string): string => {
         try {
             const u = new URL(url);
@@ -735,7 +734,8 @@ async function init() {
         return '';
     };
 
-    // content view audio trap acted on only when it follows real user gesture (relayed from preload). muted page player auto advances thru release after we cancel stream; those re reqs have no gesture so ignoring them stops it from hijacking queue w/out delaying real plays. gestureseen guards legacy cooldown fallback for case where gesture signal never arrives
+    // act only on traps that follow a real user gesture; the page player's
+    // auto-advance re-requests have none and must not hijack the queue.
     let lastActedId = '';
     let lastActedAt = 0;
     let userGestureAt = 0;
@@ -782,7 +782,8 @@ async function init() {
                     if (devMode) console.log('[bcrpc] trap skip (dup) id=' + trapId);
                     return;
                 }
-                // after acting on trap muted page player errors on cancelled stream & auto advances firing burst of stream reqs for rest of release. act only on 1st trap of burst: extractor owns queue from there & acting on burst would re run tralbum api per track & trip bandcamp rate limit (http 429). genuine new play gets thru promptly. auth user initiated plays only; ignore page autonomous re reqs so they can't reload queue. when no gesture signal arrives fall back to short cooldown
+                // act only on the first trap of a burst: the extractor owns the queue
+                // from there; re-running per track trips bandcamp's 429.
                 const authorized = gestureSeen
                     ? (userGestureAt !== 0 && now - userGestureAt < 5000)
                     : (now >= fallbackCooldownUntil);
@@ -796,24 +797,22 @@ async function init() {
                 lastActedAt = now;
 
                 const format = reqUrl.includes('.m3u8') ? 'hls' : 'raw';
-                // tag res. extractor is async so 2 quick clicks or click then page nav race. apply result of most recent auth trap only; older in flight res dropped instead of flicking player back to stale track. trapseq bumped on nav so collection play resolving after click thru to release can't hijack it
+                // apply only the most recent authorized trap; older in-flight resolutions are dropped (trapSeq bumps on nav)
                 const seq = ++trapSeq;
 
-                // note: playback is driven entirely by the resolved queue below
-                // (player:stream-incoming). we intentionally don't pre-play the
-                // trapped stream: on the collection page that stream is the item's
-                // featured track (often not track 1), which would play the wrong
-                // song for a moment before the real queue corrects it.
+                // don't pre-play the trapped stream: on the collection page it's the item's
+                // featured track, not track 1 - the resolved queue below drives playback.
 
                 if (devMode) {
                     console.log('[bcrpc] trap fire id=' + trapId + ' ' + reqUrl.slice(0, 90));
-                    // snapshot page to see why surface resolved way it did: is capture hook installed, how many discover entries captured, is playlist blob present?
+                    // snapshot the page to see why the surface resolved the way it did
                     contentView.webContents.executeJavaScript(
                         "({u:location.href,cap:!!window.__bcrpcCapture,dn:Object.keys((window.__bcrpc&&window.__bcrpc.discover)||{}).length,pl:!!document.getElementById('PlaylistPage'),td:!!window.TralbumData})"
                     ).then((s: any) => console.log('[bcrpc] page ' + JSON.stringify(s))).catch(() => {});
                 }
 
-                // extractor runs in page context where it can read embedded tracklists / captured discover grid & fetch full album from tralbum api w/ fan cookies. it pauses page muted player so it stops auto advancing then resolves complete queue which main proc forwards to player
+                // the extractor runs in page context, pauses the page player,
+                // then resolves the full queue.
                 contentView.webContents.executeJavaScript(buildExtractorScript(reqUrl, format))
                     .then((data: any) => {
                         const stale = seq !== trapSeq;
@@ -841,10 +840,8 @@ async function init() {
         // (playlist header play button never streams, so it can't be trapped;
         // the preload click hook below drives the extractor directly instead)
 
-        // wishlist hearts / collection changes post to *collect_item_cb - refresh
-        // the custom collection so the change shows up right away. removals
-        // (uncollect / hide) force a full silent re-scan, since only a re-scan
-        // can discover which item disappeared.
+        // *collect_item_cb posts = wishlist/collection changes: refresh the view.
+        // removals force a silent full re-scan (only a re-scan finds what vanished).
         if (/\/(?:un)?collect_item_cb|\/wishlist_cb|hide_unhide_item/.test(reqUrl)) {
             const removal = /uncollect_item_cb|hide_unhide_item/.test(reqUrl);
             try { onCollectAction && onCollectAction(removal); } catch { /* not ready yet */ }
@@ -853,12 +850,8 @@ async function init() {
         callback({ cancel: false });
     });
 
-    // fan playlist page play buttons: the preload intercepts them completely
-    // (bandcamp's own player preloads track 1 WITHOUT a stream request, so the
-    // audio trap could never see header/first-row clicks, and its metadata
-    // fallback painted the page <title> into the player). we read the page's
-    // data-blob - the same shape the playlist importer parses - and queue it
-    // with resolver handles; streams resolve lazily like imported playlists.
+    // fan playlist page play buttons: the preload intercepts them (track 1 preloads
+    // with no stream request, so the trap never fires) and we queue the page's data-blob.
     ipcMain.on('app:playlist-play', (_e, index?: unknown) => {
         if (!contentView || contentView.webContents.isDestroyed()) return;
         const seq = ++trapSeq;
@@ -913,11 +906,8 @@ async function init() {
             return;
         }
         const headers = { ...details.requestHeaders };
-        // spoof referer/origin for the media CDNs (they gate on a bandcamp referer)
-        // and for the BASE bandcamp.com domain (its apis - tralbum/fancollection -
-        // want it). but NOT for artist subdomains: forcing Origin=bandcamp.com on a
-        // subdomain action (e.g. c418.bandcamp.com/collect_item_cb) makes bandcamp
-        // reject it ("request must use the base domain").
+        // spoof referer/origin for the media CDNs and base bandcamp.com apis, but NOT
+        // artist subdomains (forcing Origin there makes bandcamp reject collect_item_cb).
         let host = '';
         try { host = new URL(details.url).hostname.toLowerCase(); } catch { /* leave blank */ }
         // exact-suffix host checks (host.endsWith('bcbits.com') would also match
@@ -941,10 +931,8 @@ async function init() {
     });
     ipcMain.on('window:close', () => mainWindow.close());
 
-    // a single mouse back/fwd click can surface as BOTH an os app-command (on press)
-    // & a page mouseup (on release); when the two land >350ms apart they used to
-    // slip thru as two navs, skipping a page (landing you on the default bandcamp
-    // home). wider window + latching on the 1st of a back/fwd burst collapses it to 1
+    // a mouse back/fwd click can fire BOTH an os app-command and a page mouseup;
+    // latch on the first of a burst so it counts as one nav.
     let lastNavAt = 0;
     const navGo = (dir: 'back' | 'forward') => {
         const now = Date.now();
@@ -954,12 +942,8 @@ async function init() {
         if (dir === 'back' && nav.canGoBack()) nav.goBack();
         else if (dir === 'forward' && nav.canGoForward()) nav.goForward();
     };
-    // force a navigation onto the active tab even if its page is wedged. bandcamp's
-    // collection page hangs its own renderer when you try to sort a collection over
-    // 1000 items - clicks, refresh & even the home button then appear dead because
-    // the stuck renderer swallows input. if the view is hung/crashed we drop that
-    // renderer (loadURL then spins up a fresh one); otherwise we just stop the
-    // pending load first. this is our guaranteed escape hatch.
+    // force navigation even when the page is wedged (bandcamp's >1000-item collection
+    // sort hangs its renderer): drop a hung renderer, else stop the pending load.
     const hardLoad = (url: string) => {
         const wc = contentView.webContents;
         try {
@@ -1071,12 +1055,12 @@ async function init() {
                 backgroundColor: '#181a1b',
                 webPreferences: { nodeIntegration: true, contextIsolation: false, devTools: devMode },
             });
+            keepChildVisible(spotlightWin);
             spotlightWin.loadFile(path.join(__dirname, 'search', 'search.html'));
             spotlightWin.webContents.on('did-finish-load', () => {
                 if (spotlightWin && !spotlightWin.isDestroyed()) spotlightWin.webContents.send('gsearch:shown');
             });
-            // esc dismisses - handled in MAIN so it works no matter what the
-            // page is doing (the renderer listener alone proved unreliable).
+            // esc handled in MAIN so it works no matter what the page does;
             // the search shortcut itself also toggles the popup closed.
             spotlightWin.webContents.on('before-input-event', (event, input) => {
                 if (input.type !== 'keyDown') return;
@@ -1100,9 +1084,8 @@ async function init() {
         return bandcampApi.searchPublic(String(req?.text || ''), f as any);
     });
 
-    // fetch fan whole collection (paginated) for custom view; stream running count back so the view can show load progress on big collections
-    // with the release cache on, items are persisted so the collection still opens
-    // offline, and art urls are swapped to locally cached covers when present.
+    // fetch the whole fan collection (paginated), streaming a running count back;
+    // with the release cache on it persists offline and art swaps to local covers.
     const mapCachedArt = (list: any[]): any[] => {
         if (!cacheReleasesOn()) return list;
         return list.map((i) => {
@@ -1115,11 +1098,8 @@ async function init() {
             collectionView.webContents.send('collection:items', { items: mapCachedArt(added), soFar, total });
         }
     };
-    // cache-first: with the release cache on, the saved listing loads instantly
-    // and the network is only asked for items NEWER than the cache (the
-    // fancollection api pages newest-first, so we stop at the first known item).
-    // Reload therefore "checks for new ones" instead of re-scanning everything.
-    // the wishlist rides along: same api family, items tagged wish:true.
+    // cache-first: the saved listing loads instantly and the network only fetches
+    // items newer than the cache. the wishlist rides along (wish:true).
     let collFetchActive = false;
     const fetchCollectionAndWishlist = async (fullRescan = false): Promise<{ ok: boolean; count: number; cached?: boolean; error?: string }> => {
         if (collFetchActive) return { ok: true, count: 0 };
@@ -1141,9 +1121,8 @@ async function init() {
                     const ownedKeys = new Set<string>(freshOwned.map((c) => c.tralbumType + c.tralbumId));
                     const fresh = [...freshOwned, ...freshWish.filter((c) => !ownedKeys.has(c.tralbumType + c.tralbumId))];
                     if (devMode) console.log('[bcrpc] collection:fetch cache=' + cached.length + ' new=' + fresh.length);
-                    // owned count DROPPED on bandcamp's side (something was hidden):
-                    // schedule a silent full re-scan so the vanished item disappears
-                    // here too (runs after this refresh finishes)
+                    // owned count dropped on bandcamp's side: schedule a silent full re-scan
+                    // so the vanished item disappears here too.
                     const ownedTotal = await bandcampApi.fetchOwnedTotal();
                     const ownedHave = [...fresh, ...cached.filter((c: any) => !fresh.some((f) => f.tralbumType + f.tralbumId === c.tralbumType + c.tralbumId))]
                         .filter((c: any) => !c.wish).length;
@@ -1181,9 +1160,8 @@ async function init() {
                 if (devMode) console.log('[bcrpc] collection:fetch ' + owned.length + ' owned + ' + wish.length + ' wishlist');
                 if (items.length) {
                     if (cacheReleasesOn()) collectionItemsDisk.replace(items);
-                    // a re-scan is the source of truth: drop anything the view still
-                    // shows that bandcamp no longer lists (hidden / un-wishlisted).
-                    // local pseudo-items aren't bandcamp's to prune - keep their keys
+                    // a re-scan is the source of truth: prune what bandcamp no longer lists
+                    // (local pseudo-items aren't bandcamp's to prune - keep their keys).
                     if (collectionView && !collectionView.webContents.isDestroyed()) {
                         collectionView.webContents.send('collection:prune',
                             [...items.map((c) => c.tralbumType + c.tralbumId), ...localCollectionItems().map((c) => c.tralbumType + c.tralbumId)]);
@@ -1214,9 +1192,8 @@ async function init() {
         };
     }
 
-    // resolve a collection item to a full tracklist. a purchased TRACK that's part
-    // of an album carries no artist/art of its own, so resolve it through its parent
-    // album (which has them) rather than the bare track endpoint.
+    // a purchased TRACK in an album carries no artist/art of its own -
+    // resolve it through its parent album.
     const resolveRelease = async (req: { tralbumId: string; tralbumType: TralbumType; bandId: string }): Promise<{ tracks: PlayerTrack[]; activeIndex: number }> => {
         if (isLocalId(req.tralbumId)) return { tracks: localPlayerTracks(String(req.tralbumId)), activeIndex: 0 };
         if (req.tralbumType === 't') {
@@ -1312,11 +1289,8 @@ async function init() {
                     else sessionDetails.set(k, entry);
                 }
             } else if (req.tralbumType !== 't') {
-                // opening an album re-confirms the saved index against the freshly
-                // resolved tracklist: renamed/added/removed songs heal the stored
-                // entry (and the view's search index) instead of lingering stale.
-                // 't' requests resolve through the PARENT album, so their per-track
-                // index entries are left alone.
+                // opening an album re-confirms the saved index against the fresh tracklist
+                // (heals stale entries); 't' resolves through the parent, so leave its rows alone.
                 const entry = idxCache[k] || sessionDetails.get(k);
                 if (entry) {
                     const fresh = tracks.map((t) => [t.title, t.duration] as [string, number]);
@@ -1383,16 +1357,8 @@ async function init() {
         if (collectionView && !collectionView.webContents.isDestroyed()) collectionView.webContents.send('collection:years-done');
     });
 
-    // build the collection's release index (genre tags + tracklist per item) so
-    // search can match tags/track names & the list view can show every track.
-    // cached to disk so the tralbum fetches are a one-time cost; the same payload
-    // primes the year cache for free.
-    //
-    // pacing: bandcamp throttles bursts of tralbum reads hard (the previous
-    // 3-worker/no-delay version wedged at ~50 items of a 2300-item collection on
-    // 429s). requests are now strictly serialized with a delay between releases,
-    // 429s exponentially back off, and a run aborts after repeated hard failures -
-    // the cache resumes where it left off on the next reload/launch.
+    // build the release index (tags + tracklist per item) for search & the list view;
+    // cached to disk. strictly serialized with 429 backoff - bandcamp punishes bursts.
     interface IndexRow { key: string; blob: string; tags: string[]; tracks: [string, number][] }
     type IndexCacheEntry = { g: string[]; t: [string, number][]; y: number; a?: string };
     const indexRowOf = (k: string, c: IndexCacheEntry): IndexRow => ({
@@ -1438,9 +1404,8 @@ async function init() {
         if (!Array.isArray(reqs) || !reqs.length || indexRunActive) return;
         indexRunActive = true;
         const send = (rows: IndexRow[]) => { if (rows.length && idxAlive()) collectionView.webContents.send('collection:index', rows); };
-        // local pseudo-albums index instantly from the library (no crawling, and
-        // they must never reach the bandcamp id paths below) - search & list view
-        // get their tracks/genres the same way as crawled releases
+        // local pseudo-albums index instantly from the library and must never
+        // reach the bandcamp id paths below.
         const localReqs = reqs.filter((r) => isLocalId(r.tralbumId));
         reqs = reqs.filter((r) => !isLocalId(r.tralbumId));
         if (localReqs.length) {
@@ -1494,10 +1459,8 @@ async function init() {
             sendIndexStatus('');
         };
 
-        // pacing: bandcamp's throttle punishes sustained crawls, not just bursts.
-        // work in chunks of 500 releases with a long rest between chunks, and when
-        // repeatedly 429'd mid-chunk take an immediate long rest instead of giving
-        // up (the old behavior stranded big collections partly indexed).
+        // pacing: crawl in 500-release chunks with a long rest between; repeated 429s
+        // mid-chunk force an immediate rest instead of aborting.
         const CHUNK = 500;
         const CHUNK_REST_S = 60;
         const THROTTLE_REST_S = 120;
@@ -1544,9 +1507,7 @@ async function init() {
                     releaseIndexDisk.save();
                     await rest(CHUNK_REST_S, 'chunk done');
                 }
-                // adaptive pacing: an idle user's budget goes to the crawl (fast,
-                // the 429 backoff is the brake); an actively browsing user keeps
-                // the budget & the crawl slows right down
+                // adaptive pacing: an idle user's budget goes to the crawl; active browsing slows it down.
                 const idleMs = bandcampApi.interactiveIdleMs();
                 await idxSleep(idleMs > 120_000 ? 200 : idleMs > 30_000 ? 600 : 1500);
             }
@@ -1559,10 +1520,8 @@ async function init() {
         }
     });
 
-    // release details (tags / tracklist / about) for the feed's expanded cards &
-    // anything else that wants them. collection releases are served from / added
-    // to the persistent index cache; anything else (feed items…) lives in a
-    // session-only cache so nothing outside the collection is written to disk.
+    // release details for feed cards etc: collection items go to the persistent
+    // index; anything else stays session-only (never written to disk).
     const sessionDetails = new Map<string, IndexCacheEntry>();
     ipcMain.handle('release:details', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string }) => {
         const type: TralbumType = req.tralbumType === 't' ? 't' : 'a';
@@ -1588,9 +1547,7 @@ async function init() {
         return { ok: true, tags: c.g || [], tracks: c.t || [], about: c.a || '', year: c.y || 0 };
     });
 
-    // add a release chosen in the custom collection view to the queue (no interrupt).
-    // with trackId (or trackIndex, e.g. from the list view whose rows carry no ids)
-    // set, queue only that one song from the release's tracklist.
+    // queue a release (or one song via trackId/trackIndex) without interrupting playback.
     ipcMain.handle('collection:enqueue', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
         try {
             const resolved = await resolveRelease(req);
@@ -1659,9 +1616,8 @@ async function init() {
         playlistsDisk.save();
         return { ok: true };
     });
-    // add a whole release (every track) or one song (trackId / trackIndex) to a
-    // playlist. resolution goes through the same path as the tracklist panel, so
-    // anything playable from the collection - owned or wishlisted - can be added.
+    // add a whole release or one song to a playlist; resolution matches the
+    // tracklist panel, so anything playable - owned or wishlisted - can be added.
     ipcMain.handle('playlists:add', async (_e, req: { id: string; tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
         try {
             const p = playlistById(req?.id);
@@ -1782,10 +1738,8 @@ async function init() {
         playlistsDisk.save();
         return { ok: true };
     });
-    // download a whole playlist into <downloads>/<playlist name>/: the tracks in
-    // playlist order (streams tagged like release downloads, local files copied
-    // as-is), playlist-cover.png, description.txt (description + explicit track
-    // order) and the order file in the configured playlist format (m3u default).
+    // download a playlist into <downloads>/<name>/: tracks in playlist order,
+    // playlist-cover.png, description.txt and the order file (m3u default).
     ipcMain.handle('playlists:download', (_e, id: unknown) => {
         const p = playlistById(id);
         if (!p || !p.entries.length) return { ok: false, error: 'empty playlist' };
@@ -1927,10 +1881,8 @@ async function init() {
         return { ok: true, count: p.entries.length };
     });
 
-    // import a fan playlist from bandcamp: paste a bandcamp.com/playlist/… url
-    // (collection toolbar ⋯ menu) or use the button injected on playlist pages.
-    // re-importing the same playlist UPDATES it in place (matched by its
-    // bandcamp id) instead of duplicating.
+    // import a bandcamp playlist by url (toolbar menu or the on-page button);
+    // re-importing updates in place (matched by bandcamp id).
     ipcMain.handle('playlists:import', async (_e, url: unknown) => {
         const u = String(url || '').trim().split(/[?#]/)[0];
         // real urls are bandcamp.com/<username>/playlist/<slug> (bare
@@ -1987,19 +1939,16 @@ async function init() {
         return { ok: true, id: p.id, name: p.name, count: entries.length, updated: !created };
     });
 
-    // --- local files library ----------------------------------------------------
-    // "add files from your pc to your collection": files are parsed ONCE (tags,
-    // duration, embedded art) into the on-disk library index and appear as
-    // pseudo-releases in the collection view. playback goes straight to the file.
+    // --- local files library: files are parsed ONCE (tags, duration, art) into the
+    // on-disk index and appear as pseudo-releases; playback goes straight to the file.
     const announceLocal = () => {
         const locals = localCollectionItems();
         if (locals.length && collectionView && !collectionView.webContents.isDestroyed()) {
             collectionView.webContents.send('collection:items', { items: locals, soFar: locals.length, total: 0 });
         }
     };
-    // shared by the "+ Files" picker and the music-folder scan. parsing is
-    // synchronous fs work, so yield the event loop every few files - a big
-    // import must never freeze the main process (the electron-store lesson).
+    // shared by the picker and the folder scan; parsing is sync fs work,
+    // so yield the event loop every few files.
     const localArtDir = path.join(app.getPath('userData'), 'local-art');
     const importLocalFiles = async (paths: string[], skipUnchanged: boolean): Promise<{ added: number; updated: number; skipped: number }> => {
         const lib = localFilesDisk.get();
@@ -2055,10 +2004,8 @@ async function init() {
         if (devMode) console.log('[bcrpc] library:add +' + r.added + ' ~' + r.updated);
         return { ok: true, added: r.added, updated: r.updated };
     });
-    // music-folder scan: OPT-IN (off until enabled in settings). walks the chosen
-    // folder, imports new/changed audio files, and drops library entries whose
-    // files vanished from the folder. runs at startup, when enabled, after
-    // picking a folder, and via the settings "Scan now" button.
+    // music-folder scan (opt-in): walk the folder, import new/changed audio,
+    // drop entries whose files vanished. runs at startup / enable / pick / Scan now.
     let musicScanActive = false;
     const scanMusicFolder = async (): Promise<{ ok: boolean; scanned?: number; added?: number; updated?: number; removed?: number; error?: string }> => {
         if (store.get('musicFolderScan', false) !== true) return { ok: false, error: 'scanning is disabled' };
@@ -2131,13 +2078,8 @@ async function init() {
         return { ok: true, removed };
     });
 
-    // dragging a cover out of the collection grid exports the FULL-SIZE cover as
-    // a real file (native drag). CRITICAL: webContents.startDrag must be called
-    // SYNCHRONOUSLY while the drag gesture is live - awaiting a download first
-    // enters the OS drag loop with no active drag, which wedges/crashes the main
-    // process. so: hovering a card prefetches the full-size art to temp, the
-    // dragstart asks (sync) whether the file is ready, and only then hands the
-    // drag to us; otherwise the browser's default thumbnail drag proceeds.
+    // drag a cover out of the grid as a real file. CRITICAL: startDrag must be called
+    // synchronously while the gesture is live - hover prefetches, dragstart asks (sync).
     const dragArtFile = (req: { title?: string; artist?: string }): string => {
         const safe = (((req?.artist || '') + ' - ' + (req?.title || 'cover'))
             .replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').slice(0, 80).trim()) || 'cover';
@@ -2201,7 +2143,7 @@ async function init() {
         }
     });
 
-    // keep address bar in sync w/ content view (full loads + spa route changes) & re send once header finishes loading so it isn't blank
+    // keep the address bar in sync with the content view (full loads + spa routes)
     const pushUrl = () => {
         if (headerView && !headerView.webContents.isDestroyed()) {
             headerView.webContents.send('nav:url', contentView.webContents.getURL());
@@ -2211,7 +2153,7 @@ async function init() {
     // resync the url bar and tab strip so they aren't blank
     headerView.webContents.on('did-finish-load', () => { pushUrl(); sendTabsState(); headerView.webContents.send('header:buttons', getHeaderButtons()); });
 
-    // lazily resolve stream url for queued track (collection items only ship metadata; actual stream fetched on demand from tralbum api)
+    // lazily resolve a queued track's stream url (collection items only ship metadata)
     ipcMain.handle('player:resolve-stream', async (_e, req: ResolveStreamRequest): Promise<ResolveStreamResponse> => {
         // local library tracks resolve straight to their file on disk
         if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) {
@@ -2245,10 +2187,8 @@ async function init() {
         return { token: req.token, ok: false, src: '', duration: 0, error: 'unresolved' };
     });
 
-    // downloads land in the chosen (or os default) folder w/o a save dialog, and
-    // report progress to the header so there's a visible indicator
-    // downloads registry: everything ever downloaded this session, with live
-    // status, backing the header's downloads panel. Clear drops finished entries.
+    // downloads land in the chosen folder w/o a save dialog; the registry backs
+    // the header's downloads panel (Clear drops finished entries).
     interface DlEntry { id: number; name: string; state: string; percent: number; file: string; at: number; receivedBytes: number; totalBytes: number; speed: number; lastTime: number; lastBytes: number; }
     const dlRegistry: DlEntry[] = [];
     let dlSeq = 0;
@@ -2256,7 +2196,6 @@ async function init() {
     let downloadsJustOpened = false;
     let downloadsClosedAt = 0; // Fixes the double-toggle race condition
 
-    // Dynamically calculate the window height based on active/visible rows
     const getDlHeight = () => {
         const activeCount = dlRegistry.filter(d => d.state === 'progressing').length;
         const visibleRows = Math.max(1, Math.min(3, dlRegistry.length));
@@ -2302,18 +2241,14 @@ async function init() {
             eta = Math.ceil(totalRemainingBytes / totalSpeed);
         }
 
-        // NOTE: no setBounds here - the renderer measures its real content and
-        // asks for a height via downloads:resize. running an estimate on every
-        // progress tick just fought that measurement (and moved the window
-        // dozens of times a second).
+        // no setBounds here: the renderer measures its real content and asks for a height via downloads:resize.
         downloadsWin.webContents.send('downloads:list', {
             items: dlRegistry, activeCount, overallPercent, eta
         });
     };
 
-    // progress events fire many times a second per download; the panel cannot
-    // paint that fast and every call serializes the whole registry over ipc.
-    // coalesce to ~10/s, with state changes going out immediately.
+    // progress fires many times a second per download; coalesce broadcasts to ~10/s,
+    // state changes go out immediately.
     let dlBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
     const broadcastDownloadsSoon = () => {
         if (dlBroadcastTimer) return;
@@ -2339,6 +2274,7 @@ async function init() {
                 webPreferences: { nodeIntegration: true, contextIsolation: false },
             });
 
+            keepChildVisible(downloadsWin);
             downloadsWin.on('blur', () => {
                 if (downloadsJustOpened) return;
                 if (downloadsWin && !downloadsWin.isDestroyed()) downloadsWin.close();
@@ -2357,7 +2293,7 @@ async function init() {
     };
 
     ipcMain.on('downloads:toggle', () => {
-        // Prevents the window instantly reopening if it was just closed by clicking the toggle button
+        // avoid instantly reopening when the toggle button just closed it
         if (Date.now() - downloadsClosedAt < 200) return;
 
         if (downloadsWin && !downloadsWin.isDestroyed()) { 
@@ -2368,9 +2304,7 @@ async function init() {
         }
     });
 
-    // the popup measures its real content and asks for that height (the old
-    // main-side row estimate under-sized the empty state, showing a phantom
-    // scrollbar). clamped; >4 rows caps renderer-side so the list scrolls.
+    // the popup measures its real content and asks for that height; >4 rows scrolls renderer-side.
     ipcMain.on('downloads:resize', (_e, h: unknown) => {
         if (!downloadsWin || downloadsWin.isDestroyed()) return;
         const want = Math.max(80, Math.min(600, Math.round(Number(h) || 0)));
@@ -2517,14 +2451,12 @@ async function init() {
         }
     });
 
-    // prepare (if needed) & start a download of a chosen format url
-    // ids of prepared downloads whose transfer hasn't started yet (claimed by
-    // will-download so the placeholder row becomes the real one)
+    // prepare (if needed) & start a download of a chosen format url.
+    // prepared ids whose transfer hasn't started yet (claimed by will-download):
     const awaitingTransfer: number[] = [];
     ipcMain.handle('download:start', async (_e, formatUrl: string) => {
-        // bandcamp encodes the requested format on demand, which can take a
-        // while. show the panel with a live "preparing" row immediately so the
-        // wait is visible instead of looking like nothing happened.
+        // bandcamp encodes the requested format on demand; show a live "preparing"
+        // row immediately so the wait is visible.
         openDownloadsPanel();
         const entryId = ++dlSeq;
         const entry: DlEntry = { id: entryId, name: 'Preparing on Bandcamp...', state: 'preparing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
@@ -2566,9 +2498,8 @@ async function init() {
         }
     });
 
-    // custom player is single source of now playing truth. drives discord rich presence & last.fm scrobbling
-    // the release page's inline player mirrors OUR playback (the preload updates
-    // its play state / progress / times from these)
+    // custom player is the single source of now-playing truth (discord + last.fm);
+    // the release page's inline player mirrors OUR playback via the preload.
     ipcMain.on('player:seek-frac', (_e, frac: unknown) => {
         if (playerView && !playerView.webContents.isDestroyed()) {
             playerView.webContents.send('player:seek-frac', Number(frac) || 0);
@@ -2596,9 +2527,7 @@ async function init() {
 
     ipcMain.on('app:settings', () => openSettings());
     ipcMain.on('settings:close', () => { if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close(); });
-    // preload reads the effective theme for its page synchronously at document-start
-    // so its anti-flash cloak matches (no opacity cloak when the page will be light,
-    // else it stays blank grey)
+    // preload reads the effective theme synchronously at document-start so its anti-flash cloak matches
     ipcMain.on('app:theme-for', (e, url: unknown) => { e.returnValue = themeForUrl(typeof url === 'string' ? url : ''); });
 
     // let the user pick where purchased downloads are saved
@@ -2692,10 +2621,8 @@ async function init() {
         try {
             const existing = (store.get('lastfm') as any) || {};
             const incomingLfm = { ...(data.lastfm || {}) };
-            // a BLANK key/secret never overwrites a stored one: a settings window
-            // whose load failed (or a save racing the load) posts empty fields,
-            // and wiping the creds silently kills scrobbling until re-entered.
-            // scrobbling is turned off via the enabled toggle, not by blanking.
+            // a BLANK key/secret never overwrites a stored one (a settings window whose load
+            // failed posts empty fields, silently killing scrobbling until re-entered).
             if (!String(incomingLfm.apiKey || '').trim() && existing.apiKey) delete incomingLfm.apiKey;
             if (!String(incomingLfm.apiSecret || '').trim() && existing.apiSecret) delete incomingLfm.apiSecret;
             store.set('lastfm', { ...existing, ...incomingLfm });
@@ -2799,11 +2726,8 @@ async function init() {
                 nodeIntegration: false,
                 contextIsolation: true,
                 sandbox: true,
-                // webSecurity is off so the in-page extractor can hit bandcamp.com apis
-                // cross-origin from artist subdomains & darkreader can pull cross-origin
-                // css/fonts. the page is otherwise locked down (no node integration,
-                // sandboxed, context-isolated), which is what contains the risk. CodeQL
-                // flags this - it's an intentional trade-off for a browser-like client.
+                // webSecurity off so the in-page extractor can hit bandcamp apis cross-origin;
+                // otherwise sandboxed/context-isolated. intentional trade-off (CodeQL flags it).
                 webSecurity: false,
                 devTools: devMode,
                 autoplayPolicy: 'no-user-gesture-required',
@@ -2820,7 +2744,7 @@ async function init() {
         const wc = view.webContents;
         const isActive = () => contentView && !wc.isDestroyed() && wc.id === contentView.webContents.id;
 
-        // nav invalidates in-flight extractor results (late trap must not load into player after moving on)
+        // nav invalidates in-flight extractor results (a late trap must not load into the player after moving on)
         wc.on('did-start-navigation', (...args: any[]) => {
             const isMainFrame = args.length >= 4 ? Boolean(args[3]) : true;
             if (isMainFrame && isActive()) { trapSeq++; userGestureAt = 0; bandcampApi.noteInteractive(); }
@@ -2858,15 +2782,12 @@ async function init() {
             if (tmpl.length) Menu.buildFromTemplate(tmpl).popup();
         });
 
-        // artist social/promo links (instagram, youtube, spotify…) open in a separate
-        // window instead of hijacking the main view. limited to a known list so
-        // bandcamp itself, bandcamp-pro custom domains, and checkout/login redirects
-        // (paypal, stripe, google/facebook oauth) stay in-app & keep working.
+        // social/promo links open a separate window; limited to a known list so
+        // bandcamp itself and checkout/oauth redirects stay in-app.
         wc.on('will-navigate', (event, url) => {
             if (isSocialHost(url)) { event.preventDefault(); openInNewWindow(url); }
         });
 
-        // keep url bar + tab title in sync
         // keep url bar + tab title in sync
         const onNav = () => {
             const tab = tabs.find((t) => t.view === view);
@@ -2901,11 +2822,8 @@ async function init() {
         wc.on('did-navigate-in-page', onNav);
         wc.on('page-title-updated', onNav);
 
-        // failsafe against the grey-page hang: the dark cloak hides the body until
-        // darkreader paints; if darkreader never initializes (script error, redirect
-        // race like ?from=menubar hops, bfcache restores), the page stayed an empty
-        // grey forever. after a few seconds, if nothing painted, drop the user-origin
-        // cloak AND force the body visible - worst case is a brief unthemed flash.
+        // grey-hang failsafe: if darkreader never paints within a few seconds,
+        // drop the cloak and force the body visible (worst case: brief unthemed flash).
         const liftCloakIfStuck = () => {
             setTimeout(() => {
                 if (wc.isDestroyed()) return;
@@ -2998,11 +2916,8 @@ async function init() {
         wc.on('unresponsive', () => { (wc as any).__hung = true; });
         wc.on('responsive', () => { (wc as any).__hung = false; });
 
-        // ignore page beforeunload guards. bandcamp's collection reorder sets a
-        // "you have unsaved changes" beforeunload; electron CANCELS any navigation a
-        // beforeunload tries to block, which silently kills link clicks, refresh &
-        // even our home button (it looks like the whole page is frozen). preventing
-        // the default lets navigation always proceed.
+        // ignore page beforeunload guards: electron CANCELS navigations they try to block,
+        // which killed link clicks / refresh / home on bandcamp's collection reorder page.
         wc.on('will-prevent-unload', (event) => { event.preventDefault(); });
     }
 
@@ -3098,11 +3013,8 @@ async function init() {
         setTimeout(() => { void scanMusicFolder(); }, 4000);
     }
 
-    // --- auto updates (packaged builds only; dev has no update feed) ----------
-    // the feed is set EXPLICITLY at runtime: builds shipped before the publish
-    // repo was corrected have app-update.yml baked pointing at bandcamp-rpc
-    // (which has no releases), so the built-in feed 404'd silently forever.
-    // status is tracked and streamed to the settings window's About section.
+    // --- auto updates (packaged builds only). the feed is set EXPLICITLY at runtime:
+    // old builds have app-update.yml baked pointing at bandcamp-rpc (404s silently).
     let updStatus: { state: string; info: string } = { state: 'idle', info: '' };
     const pushUpdStatus = (state: string, info = '') => {
         updStatus = { state, info };
