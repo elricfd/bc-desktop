@@ -39,10 +39,9 @@ npm run build
 
 ### macOS: "Bandcamp.app is damaged and can't be opened"
 
-The macOS builds are not notarized with an Apple Developer ID yet, so Gatekeeper
-refuses the downloaded app. Either allow it once in **System Settings > Privacy &
-Security > Open Anyway** (after the first blocked launch), or clear the quarantine
-flag from a terminal:
+The macOS builds are not signed with an Apple Developer ID or notarized, so
+Gatekeeper refuses the downloaded app. After copying it to Applications, clear the
+quarantine flag once from a terminal and it will open normally from then on:
 
 ```bash
 xattr -cr /Applications/Bandcamp.app

@@ -30,6 +30,7 @@
             }
         ],
         "asar": true,
+        "afterPack": "scripts/after-pack.js",
         "directories": {
             "output": "build"
         },
@@ -68,6 +69,8 @@
                 "zip"
             ],
             "category": "public.app-category.music",
+            "hardenedRuntime": true,
+            "gatekeeperAssess": false,
             "icon": "assets/bandcamp-button-circle-black-512.png"
         }
     },
