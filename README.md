@@ -37,6 +37,19 @@ npm run dev
 npm run build
 ```
 
+### macOS: "Bandcamp.app is damaged and can't be opened"
+
+The macOS builds are not notarized with an Apple Developer ID yet, so Gatekeeper
+refuses the downloaded app. Either allow it once in **System Settings > Privacy &
+Security > Open Anyway** (after the first blocked launch), or clear the quarantine
+flag from a terminal:
+
+```bash
+xattr -cr /Applications/Bandcamp.app
+```
+
+`npm run dev` is unaffected because it runs Electron straight from `node_modules`.
+
 ### Key Shortcuts
 
 **Playback** (work anywhere in the app, except while typing in a text field):
