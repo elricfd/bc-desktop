@@ -1,8 +1,6 @@
 import { ipcRenderer } from 'electron';
 
-// global search view: bandcamp's own public search api, with playable results.
-// tracks/albums play (or queue) via the same resolve path the collection uses;
-// artists open their page.
+// global search view over bandcamp's public search api
 
 ipcRenderer.send('gsearch:log', 'booted');
 
@@ -27,7 +25,6 @@ function escapeHtml(s: string): string {
 const BADGE: Record<string, string> = { t: 'track', a: 'album', b: 'artist' };
 
 function playReq(r: Result): any {
-    // a track rides inside its album when known so metadata resolves correctly
     if (r.type === 't') {
         return r.albumId
             ? { tralbumId: r.albumId, tralbumType: 'a', bandId: r.bandId, trackId: r.id, trackOnly: true }
@@ -87,7 +84,7 @@ async function run(): Promise<void> {
     setState('searching…');
     const res: { ok: boolean; results: Result[]; error?: string } =
         await ipcRenderer.invoke('gsearch:query', { text, filter });
-    if (mySeq !== seq) return; // superseded by newer keystrokes
+    if (mySeq !== seq) return;
     if (!res.ok) { setState('search failed' + (res.error ? ': ' + res.error : '')); return; }
     render(res.results || []);
 }
@@ -111,9 +108,8 @@ $('f-b').addEventListener('click', () => setFilter('b'));
 $('close').addEventListener('click', () => ipcRenderer.send('gsearch:close'));
 ipcRenderer.on('gsearch:shown', () => q.focus());
 // nothing from a search is kept: closing the view wipes the query & results
-// (search itself never writes to any cache - this clears the visible leftovers)
 ipcRenderer.on('gsearch:hidden', () => {
-    seq++; // invalidate any in-flight request
+    seq++;
     q.value = '';
     setState('Type to search Bandcamp. Results play straight into the queue.');
 });

@@ -1,6 +1,4 @@
-// minimal ID3v2.3 tag builder for stream downloads: Title / Artist / Album
-// Artist / Album / Track number / Year / Lyrics / embedded cover. the tag is
-// simply prepended to the mp3 bytes (players skip the tag to the first frame).
+// minimal ID3v2.3 tag builder
 
 export interface Id3Tag {
     title: string;
@@ -11,7 +9,6 @@ export interface Id3Tag {
     trackTotal?: number;
     year?: number;
     lyrics?: string;
-    /** jpeg/png bytes for the embedded cover. */
     art?: Buffer;
     artMime?: string;
 }
@@ -44,8 +41,7 @@ function lyricsFrame(lyrics: string): Buffer {
     ]));
 }
 
-// attached picture: enc, mime (latin1 + null), type 0x03 = front cover,
-// description (utf16 + null), image bytes
+// attached picture: enc, mime (latin1 + null), type 0x03 = front cover, description (utf16 + null), image bytes
 function apicFrame(art: Buffer, mime: string): Buffer {
     return frame('APIC', Buffer.concat([
         Buffer.from([0x01]),

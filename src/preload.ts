@@ -1,10 +1,6 @@
 import { ipcRenderer } from 'electron';
 
-// anti-flash + hide bandcamp's own audio bars (our player is the only transport).
-// in DARK mode we cloak the body until darkreader paints (avoids a white flash);
-// in LIGHT mode we must NOT do that (darkreader never runs, so the body would stay
-// hidden and the whole page shows blank grey). theme is read synchronously so the
-// right cloak applies at document-start.
+// anti-flash cloak: dark mode hides the body until darkreader paints
 let bcTheme = 'dark';
 try { bcTheme = (ipcRenderer.sendSync('app:theme-for', location.href) as string) || 'dark'; } catch (e) { /* default dark */ }
 const antiFlashStyle = document.createElement('style');
@@ -12,16 +8,11 @@ antiFlashStyle.textContent = (bcTheme === 'light'
     ? ''
     : `html { background-color: #181a1b !important; }
        html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }`)
-    // keep the release-page .inline_player fully visible (people like it): it is
-    // kept alive by mirroring OUR player's state into it (see page:now-playing).
     + `\n#collection-player, .floating-player { display: none !important; }`;
 const antiFlashRoot = document.head || document.documentElement;
 if (antiFlashRoot) antiFlashRoot.appendChild(antiFlashStyle);
 else document.addEventListener('DOMContentLoaded', () => (document.head || document.documentElement).appendChild(antiFlashStyle));
 
-// failsafe: if darkreader never paints (script error, throttled subresources),
-// the cloak used to leave the page an empty grey forever. lift it after a few
-// seconds - worst case is a brief unthemed flash instead of a hang.
 if (bcTheme !== 'light') {
     setTimeout(() => {
         try {
@@ -32,7 +23,7 @@ if (bcTheme !== 'light') {
     }, 6000);
 }
 
-// mirror discover grid (/api/discover/1/discover_web) into window.__bcrpc.discover so extractor resolves genre page play to full album w/out track -> album lookup. injected as main world script at document start (csp stripped) before page grabs fetch. passive read of resp clone
+// mirror the discover api into window.__bcrpc.discover so the extractor can resolve genre-page plays to full albums
 const CAPTURE_SRC = `
 (function () {
     if (window.__bcrpcCapture) return;
@@ -123,35 +114,26 @@ function injectMainWorld(code: string): boolean {
     }
 }
 
-// inject moment html exists ahead of page own scripts
 if (!injectMainWorld(CAPTURE_SRC)) {
     const obs = new MutationObserver(() => { if (injectMainWorld(CAPTURE_SRC)) obs.disconnect(); });
     obs.observe(document, { childList: true, subtree: true });
 }
 
-// tell main about real user gestures; acts only on audio trap following one so muted page player auto advance can't hijack queue. mousedown fires 1st
+// tell main about real user gestures
 const sendGesture = () => { try { ipcRenderer.send('player:user-gesture'); } catch (e) {} };
 document.addEventListener('mousedown', sendGesture, true);
 document.addEventListener('keydown', (e) => {
     if (e.key === ' ' || e.key === 'Enter' || e.key === 'MediaPlayPause') sendGesture();
 }, true);
 
-// media hotkeys (soundcloud-style) from bandcamp pages: space play/pause,
-// ←/→ scrub 5s (hold to keep scrubbing), shift+←/→ prev/next, shift+↑/↓ volume.
-// mapped here (not in main) so typing in the page's inputs is never hijacked.
-// NOTE: keep in sync with player.ts / collection.ts / header.html - this preload
-// is sandboxed so the mapping can't live in a shared module.
+// media hotkeys from bandcamp pages (space, arrows, shift combos, digit seek)
 const isTypingEl = (el: any): boolean => {
     if (!el || !el.tagName) return false;
     const tag = el.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
 };
 const mediaHotkeyOf = (e: KeyboardEvent): string => {
-    // bandcamp's header search lives in a web component: at the document
-    // boundary the event RETARGETS to the shadow host, so e.target alone never
-    // says INPUT and space fell through to play/pause while typing a query.
-    // resolve the real element via composedPath + the shadow-piercing active
-    // element, and bail if any of them is a typing surface.
+    // the header search is in a shadow DOM, so e.target retargets to the host
     const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
     const deep = (path.length ? path[0] : e.target) as HTMLElement | null;
     let ae: any = document.activeElement;
@@ -165,7 +147,6 @@ const mediaHotkeyOf = (e: KeyboardEvent): string => {
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
-    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 };
@@ -178,13 +159,7 @@ document.addEventListener('keydown', (e) => {
     try { ipcRenderer.send('player:hotkey', cmd); } catch (err) { /* bridge gone */ }
 }, true);
 
-// fan playlist page play buttons - header AND rows - are intercepted entirely.
-// bandcamp's player preloads track 1 without a stream request, so the audio
-// trap never saw header/first-row clicks (they looked dead) and its metadata
-// fallback painted the page <title> into the player. every playlist button
-// carries tracklistkey="playlist:<id>"; row buttons also carry trackindex.
-// we suppress the native player (no double audio) and let main queue the
-// page's data-blob directly at the clicked index.
+// playlist page play buttons are intercepted entirely
 document.addEventListener('click', (e) => {
     if (e.button !== 0) return;
     if (!/\/playlist\//.test(location.pathname)) return;
@@ -192,15 +167,12 @@ document.addEventListener('click', (e) => {
     const btn = t && t.closest ? t.closest('.play-pause-button[tracklistkey^="playlist"]') as HTMLElement | null : null;
     if (!btn) return;
     e.preventDefault();
-    e.stopPropagation(); // capture phase: bandcamp's own handlers never run
+    e.stopPropagation();
     const idx = parseInt(btn.getAttribute('trackindex') || '0', 10) || 0;
     ipcRenderer.send('app:playlist-play', idx);
 }, true);
 
-// mirror OUR playback onto the release page's inline player (play state,
-// progress bar, elapsed/total time) so it works like the native one. only when
-// the playing track belongs to THIS page (url match) - other releases' players
-// are left alone. clicking its progress bar seeks our player.
+// mirror OUR playback onto the release page's inline player, only when the playing track belongs to THIS page
 const fmtClock = (x: number): string => Math.floor(x / 60) + ':' + String(Math.floor(x % 60)).padStart(2, '0');
 ipcRenderer.on('page:now-playing', (_e, np: any) => {
     try {
@@ -210,8 +182,6 @@ ipcRenderer.on('page:now-playing', (_e, np: any) => {
         const norm = (u: string) => String(u || '').split(/[?#]/)[0].replace(/\/+$/, '').toLowerCase();
         const page = norm(location.href);
         const track = norm(np.url);
-        // album page match: the playing track's url is the release page url; track
-        // pages of the same release also count (shared /album/ or /track/ root)
         const match = track && (track === page || track.startsWith(page + '/') || page.startsWith(track));
         if (!match) return;
         const btn = ip.querySelector('.playbutton');
@@ -242,9 +212,7 @@ document.addEventListener('click', (e) => {
     ipcRenderer.send('player:seek-frac', frac);
 }, true);
 
-// download button on release pages: owned releases jump to their bandcamp
-// download page (all your formats, tracked in the downloads panel); unowned
-// ones download the mp3-128 streams (tagged, with cover) via the app.
+// download button on release pages (owned releases only): jumps to their bandcamp download page
 function injectReleaseDownload(): void {
     try {
         if (!/\/(album|track)\//.test(location.pathname)) return;
@@ -260,8 +228,6 @@ function injectReleaseDownload(): void {
         if (!anchor || !anchor.parentElement) return;
         ipcRenderer.invoke('release:download-info', { tralbumId, tralbumType: type }).then((res: any) => {
             if (document.getElementById('bcrpc-dlbtn')) return;
-            // owned releases only: the button opens YOUR bandcamp download page.
-            // nothing is offered for releases you haven't bought.
             if (!res || !res.owned || !res.downloadUrl) return;
             const btn = document.createElement('button');
             btn.id = 'bcrpc-dlbtn';
@@ -277,12 +243,9 @@ function injectReleaseDownload(): void {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', injectReleaseDownload);
 else injectReleaseDownload();
 
-// fan playlist pages get an import button (floating pill, page-shape agnostic):
-// main fetches the page's data blob and mirrors it into the app's playlists.
-// re-importing the same playlist updates it instead of duplicating.
+// playlist pages get a floating import pill
 function injectPlaylistImport(): void {
     try {
-        // real playlist paths are /<username>/playlist/<slug>
         if (!/\/playlist\/[^/]+/.test(location.pathname)) return;
         if (document.getElementById('bcrpc-plimport')) return;
         const btn = document.createElement('button');
@@ -314,9 +277,7 @@ window.addEventListener('mouseup', (e) => {
     if (e.button === 4) ipcRenderer.send('app:forward');
 });
 
-// middle click a link -> open in a new tab. handling it here (rather than relying
-// on chromium's window-open disposition, which was inconsistent) reliably catches
-// every anchor. preventDefault stops the native new-window from also firing.
+// middle click a link -> new tab (chromium's window-open disposition was inconsistent)
 document.addEventListener('auxclick', (e) => {
     if (e.button !== 1) return;
     const t = e.target as HTMLElement;
@@ -327,8 +288,7 @@ document.addEventListener('auxclick', (e) => {
     ipcRenderer.send('app:open-tab', a.href);
 }, true);
 
-// shift+click an album/track link -> add that release to the queue instead of
-// navigating. works anywhere on bandcamp (collection page, release pages, feeds).
+// shift+click an album/track link -> add that release to the queue instead of navigating
 document.addEventListener('click', (e) => {
     if (!e.shiftKey || e.button !== 0) return;
     const t = e.target as HTMLElement;

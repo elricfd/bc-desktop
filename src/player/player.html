@@ -19,7 +19,6 @@
             user-select: none; overflow: hidden;
         }
 
-        /* SLIDE UP QUEUE PANEL */
         .queue-panel {
             position: fixed; left: 0; right: 0; bottom: 64px; height: 360px;
             background: var(--panel); border-top: 1px solid var(--line);
@@ -48,7 +47,6 @@
         .q-artist { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
         .q-dur { font-size: 11px; color: var(--sub); }
 
-        /* BOTTOM PLAYER BAR */
         .player-bar {
             position: fixed; left: 0; right: 0; bottom: 0; height: 64px;
             background: var(--bar); border-top: 1px solid var(--line);
@@ -57,7 +55,6 @@
         }
 
         .now-playing { display: flex; align-items: center; gap: 12px; width: 26%; min-width: 150px; overflow: hidden; }
-        /* hidden until something is playing so there's no empty grey box at idle */
         .art { width: 46px; height: 46px; border-radius: 3px; background: #242729; object-fit: cover; flex-shrink: 0; display: none; }
         .info { display: flex; flex-direction: column; overflow: hidden; white-space: nowrap; }
         .title { font-size: 13px; font-weight: 600; color: #fff; text-overflow: ellipsis; overflow: hidden; }
@@ -86,7 +83,6 @@
         .right { display: flex; align-items: center; justify-content: flex-end; gap: 14px; width: 26%; min-width: 150px; }
         #vol { width: 84px; }
 
-        /* repeat-one: the "1" sits centered inside the repeat loop */
         .btn-repeat.one::after {
             content: "1"; position: absolute; inset: 0;
             display: flex; align-items: center; justify-content: center;

@@ -29,7 +29,7 @@ const panel = $('queue-panel');
 const queueList = $('queue-list');
 
 const queue = new Queue();
-// a failed art load would show a broken-image glyph; drop the src so it falls back to the grey box
+// a failed art load would show a broken-image glyph
 elArt.addEventListener('error', () => elArt.removeAttribute('src'));
 let hls: any = null;
 let scrubbing = false;
@@ -62,7 +62,6 @@ async function ensureSrc(track: PlayerTrack): Promise<string> {
             if (res.artist) track.artist = res.artist;
         }
     } catch {
-        // leave src empty; playcurrent will skip
     }
     return track.src;
 }
@@ -75,7 +74,7 @@ async function playCurrent(): Promise<void> {
     const track = queue.current();
     if (!track) return;
 
-    // stop outgoing track & reset prog ui now (possibly async) stream res otherwise time keeps advancing audibly & on seek bar until new url ready then snaps back
+    // stop the outgoing track & reset the progress ui before the (async) stream resolve
     const token = ++playToken;
     try { audio.pause(); } catch { }
     if (hls) { hls.destroy(); hls = null; }
@@ -87,10 +86,8 @@ async function playCurrent(): Promise<void> {
     renderQueue();
 
     const src = await ensureSrc(track);
-    // newer play started while resolving, abandon this
     if (token !== playToken) return;
     if (!src) {
-        // couldn't resolve, skip forward so queue doesn't wedge
         const next = queue.next();
         if (next) return playCurrent();
         return;
@@ -106,11 +103,10 @@ async function playCurrent(): Promise<void> {
     try {
         await audio.play();
     } catch {
-        // autoplay rejection, ui stays paused
     }
 }
 
-// title navs to album page (falling back to track/release page); artist navs to artist page, url is artist landing page
+// title navs to album page (falling back to track/release page)
 function albumUrlOf(track: PlayerTrack | null): string {
     return track?.albumUrl || track?.url || '';
 }
@@ -120,8 +116,7 @@ function artistUrlOf(track: PlayerTrack | null): string {
     try { return new URL(u).origin; } catch { return ''; }
 }
 
-// a page url can be resolved on demand (playlist tracks ship without one) as long
-// as we know the track/release id, so treat those as linkable too
+// a page url can be resolved on demand
 function linkable(track: PlayerTrack | null): boolean {
     return Boolean(track && (albumUrlOf(track) || track.id || track.tralbumId));
 }
@@ -131,8 +126,6 @@ function renderNowPlaying(track: PlayerTrack): void {
     elArtist.textContent = track.artist || 'Bandcamp';
     elTitle.classList.toggle('link', linkable(track));
     elArtist.classList.toggle('link', linkable(track));
-    // something's playing now, so reveal the art box (hidden at idle). no art ->
-    // leave the src off so it shows the grey box, not a broken-image glyph
     elArt.style.display = 'block';
     if (track.art) elArt.src = track.art;
     else elArt.removeAttribute('src');
@@ -193,15 +186,12 @@ let loadedSigAt = 0;
 ipcRenderer.on('player:stream-incoming', (_e, data: StreamPayload) => {
     if (!data?.queue?.length) return;
     const target = data.queue[data.activeIndex] || data.queue[0];
-    // retrap of the track already loaded: that's the user clicking the page's
-    // play button again - toggle play/pause (burst dedup happens main-side)
     if (queue.current()?.id === target?.id && queue.current()?.id) { doToggle(); return; }
 
-    // once loaded release muted page player keeps advancing thru it (each cancelled stream makes it skip to next track) firing burst of identical queue events. acting on them makes player race to last track & floods bandcamp w/ stream reqs (http 429). ignore same queue events for short window; diff release (or deliberate replay after burst) still loads.
+    // the muted page player auto-advances and fires a burst of identical queue events
     const sig = data.queue.length + ':' + (data.queue[0]?.id || '') + ':' + (data.queue[data.queue.length - 1]?.id || '');
     const now = Date.now();
     if (sig === loadedSig && now - loadedSigAt < 4000) {
-        // same queue resent for diff track, deliberate click on another row in current playlist/release. jump w/in loaded queue rather than reloading.
         const idx = queue.tracks.findIndex((t) => t.id === target?.id);
         if (idx !== -1 && queue.jumpTo(idx)) playCurrent();
         return;
@@ -213,8 +203,7 @@ ipcRenderer.on('player:stream-incoming', (_e, data: StreamPayload) => {
     playCurrent();
 });
 
-// append tracks to the queue without interrupting playback (add-to-queue). if
-// nothing was playing, start with the first newly-added track.
+// append tracks to the queue without interrupting playback (add-to-queue)
 ipcRenderer.on('player:enqueue', (_e, data: { tracks?: PlayerTrack[] }) => {
     const tracks = (data && data.tracks) || [];
     if (!tracks.length) return;
@@ -256,15 +245,13 @@ audio.addEventListener('ended', () => {
     if (next) playCurrent();
 });
 
-// transport does nothing until something is actually loaded. shared by the
-// buttons and the app-wide media hotkeys.
+// transport does nothing until something is actually loaded
 function doToggle(): void {
     if (!queue.current()) return;
     audio.paused ? audio.play().catch(() => {}) : audio.pause();
 }
 function doPrev(): void {
     if (!queue.current()) return;
-    // restart current track if past 3s mark, otherwise go back
     if (audio.currentTime > 3) { audio.currentTime = 0; return; }
     if (queue.prev()) playCurrent();
 }
@@ -274,7 +261,6 @@ function doNext(): void {
 }
 function doSeekBy(delta: number): void {
     if (!queue.current() || !audio.duration) return;
-    // stop just shy of the end so a big forward jump doesn't fire 'ended'
     audio.currentTime = Math.min(Math.max(0, audio.currentTime + delta), Math.max(0, audio.duration - 0.25));
     emitNowPlaying(true);
 }
@@ -287,9 +273,7 @@ $('btn-play').addEventListener('click', doToggle);
 $('btn-prev').addEventListener('click', doPrev);
 $('btn-next').addEventListener('click', doNext);
 
-// media hotkeys (soundcloud-style): space play/pause, ←/→ scrub 5s (hold to keep
-// scrubbing), shift+←/→ prev/next track, shift+↑/↓ volume. every view maps keys
-// itself (so typing in inputs is never hijacked) & forwards here via main.
+// media hotkeys: every view maps keys itself (typing is never hijacked) and forwards here via main
 function runHotkey(cmd: string): void {
     if (cmd === 'toggle') doToggle();
     else if (cmd === 'prev') doPrev();
@@ -316,26 +300,20 @@ ipcRenderer.on('player:seek-frac', (_e, frac: unknown) => {
     emitNowPlaying(true);
 });
 
-// same mapping for keys pressed while the player view itself is focused.
-// NOTE: keep in sync with the copies in preload.ts / collection.ts / header.html
-// (the content preload is sandboxed, so this can't live in a shared module).
+// same mapping while the player view is focused
 function mediaHotkeyOf(e: KeyboardEvent): string {
     const t = e.target as HTMLElement | null;
     const tag = t ? t.tagName : '';
-    // a focused seek/volume slider is an INPUT, but it takes no text: keep its
-    // native arrow-key scrubbing (deliberate) while space & digits still work
+    // a focused seek/volume slider is an INPUT, but it takes no text: keep its native arrow-key scrubbing
     const isRange = tag === 'INPUT' && (t as HTMLInputElement).type === 'range';
     if (t && !isRange && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable)) return '';
     const space = e.key === ' ' || e.code === 'Space';
-    if (space && tag === 'BUTTON') return ''; // let a focused button click natively
+    if (space && tag === 'BUTTON') return '';
     if (space) return 'toggle';
-    // focused slider: PLAIN arrows stay native (that's the click-then-scrub flow),
-    // but shift+arrows are still ours - track skip & volume work everywhere
     if (e.key === 'ArrowLeft') return e.shiftKey ? 'prev' : (isRange ? '' : 'seek-back');
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : (isRange ? '' : 'seek-fwd');
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
-    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 }
@@ -343,7 +321,6 @@ document.addEventListener('keydown', (e) => {
     const cmd = mediaHotkeyOf(e);
     if (!cmd) return;
     e.preventDefault();
-    // holding a key repeats seek/volume (that's the scrub) but not transport toggles
     if (e.repeat && (cmd === 'toggle' || cmd === 'prev' || cmd === 'next')) return;
     runHotkey(cmd);
 });
@@ -374,8 +351,7 @@ function setPanel(open: boolean): void {
 btnQueue.addEventListener('click', () => setPanel(!panelOpen));
 $('btn-queue-close').addEventListener('click', () => setPanel(false));
 
-// title -> album page, artist -> artist page/discog, in content view.
-// resolve a missing page url on demand (playlist tracks), caching it on the track
+// title -> album page, artist -> artist page/discog, in content view
 async function ensurePageUrl(track: PlayerTrack | null): Promise<string> {
     if (!track) return '';
     const have = albumUrlOf(track);
@@ -393,7 +369,7 @@ elTitle.addEventListener('click', async () => navigate(await ensurePageUrl(queue
 elArt.addEventListener('click', async () => navigate(await ensurePageUrl(queue.current())));
 elArtist.addEventListener('click', async () => { await ensurePageUrl(queue.current()); navigate(artistUrlOf(queue.current())); });
 
-// right click anything in now playing area to copy link.
+// right click anything in now playing area to copy link
 const copyLink = (url: string) => { if (url.startsWith('https://')) { clipboard.writeText(url); flashCopied(); } };
 elTitle.addEventListener('contextmenu', (e) => { e.preventDefault(); copyLink(albumUrlOf(queue.current())); });
 elArt.addEventListener('contextmenu', (e) => { e.preventDefault(); copyLink(albumUrlOf(queue.current())); });

@@ -1,9 +1,7 @@
 import { ipcRenderer } from 'electron';
 import type { FeedStory } from '../shared/types';
 
-// custom feed view: a clean, endlessly-scrollable grid of stories from artists
-// (new releases) & fans you follow, replacing bandcamp's own feed page. data
-// comes from main (feed:fetch) which pages the fan_dash_feed_updates endpoint.
+// custom feed view: endlessly-scrollable grid of stories from artists & fans you follow
 
 ipcRenderer.send('feed:log', 'booted');
 
@@ -13,8 +11,8 @@ const countEl = $('count');
 
 let stories: FeedStory[] = [];
 const seen = new Set<string>();
-let filter = ''; // '' = all, 'nr' = new releases, 'df' = fan activity
-let oldest = 0; // unix ts to page back from
+let filter = '';
+let oldest = 0;
 let fetching = false;
 let exhausted = false;
 let pagesLoaded = 0;
@@ -157,7 +155,6 @@ async function togglePanel(s: FeedStory, card: HTMLElement): Promise<void> {
     const tracksEl = panel.querySelector('.fdtracks') as HTMLElement;
     if (!res || !res.ok) { tracksEl.innerHTML = '<div class="fdstate">couldn\'t load the details</div>'; return; }
 
-    // tag chips open that tag's discover page on bandcamp (e.g. /discover/experimental)
     tagsEl.innerHTML = '';
     for (const t of res.tags || []) {
         const chip = document.createElement('span');
@@ -196,7 +193,6 @@ window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
         if (!panelEl || !panelKey) return;
-        // find the card whose story key matches by re-walking current cards
         const anchor = panelEl.previousElementSibling as HTMLElement | null;
         if (anchor && anchor.classList.contains('card')) { panelEl.remove(); endOfRow(anchor).after(panelEl); }
     }, 80);
@@ -211,7 +207,6 @@ function render(): void {
         setState(fetching ? 'Loading your feed…' : 'nothing here - follow some artists on bandcamp and check back.');
         return;
     }
-    // detach the open panel so a re-render (new page / filter) doesn't destroy it
     if (panelEl) panelEl.remove();
     list.innerHTML = '';
     const frag = document.createDocumentFragment();
@@ -231,7 +226,7 @@ function render(): void {
     if (panelEl && panelKey) {
         const card = list.querySelector(`.card[data-key="${CSS.escape(panelKey)}"]`) as HTMLElement | null;
         if (card) endOfRow(card).after(panelEl);
-        else { panelEl = null; panelKey = ''; } // its story got filtered out
+        else { panelEl = null; panelKey = ''; }
     }
 }
 
@@ -261,14 +256,12 @@ async function fetchPage(reset = false): Promise<void> {
         }
         stories.sort((a, b) => (b.date || 0) - (a.date || 0));
         const nextOldest = res.oldest || 0;
-        // no forward progress = end of the feed
         if (!added || !nextOldest || (oldest && nextOldest >= oldest)) exhausted = true;
         oldest = nextOldest || oldest;
         render();
     } finally {
         fetching = false;
         updateCount();
-        // keep filling until the view is actually scrollable (small pages)
         if (!exhausted && list.scrollHeight <= list.clientHeight + 40) fetchPage();
     }
 }
@@ -284,7 +277,6 @@ function setFilter(f: string): void {
     $('f-nr').classList.toggle('on', f === 'nr');
     $('f-df').classList.toggle('on', f === 'df');
     render();
-    // a sparse filter may leave the view short; top it up
     if (!exhausted && list.scrollHeight <= list.clientHeight + 40) fetchPage();
 }
 $('f-all').addEventListener('click', () => setFilter(''));

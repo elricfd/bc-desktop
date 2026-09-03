@@ -12,9 +12,9 @@ const dirBtn = $('dir');
 const countEl = $('count');
 
 let items: CollectionItem[] = [];
-const itemKeys = new Map<string, number>(); // key -> index into items
+const itemKeys = new Map<string, number>();
 let loading = false;
-let fullRescan = false; // set by shift+Reload
+let fullRescan = false;
 let descending = true;
 let expected = 0; 
 let currentlyRenderedCount = 0;
@@ -27,8 +27,7 @@ function escapeHtml(s: string): string {
     return (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 }
 
-// icons: Dazzle Line Icons (dazzleui.pro via svgrepo, CC BY 4.0) - 24px line
-// set, stroke-2 round caps, currentColor. arrows flip via css .asc.
+// icons: Dazzle Line Icons (dazzleui.pro via svgrepo, CC BY 4.0)
 const LINE = 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
 const ICONS = {
     arrowDown: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 5V19M12 19L6 13M12 19L18 13" ${LINE}/></svg>`,
@@ -55,18 +54,15 @@ async function load(): Promise<void> {
     ipcRenderer.send('collection:log', 'fetch start');
     
     const onItems = (_e: unknown, p: { items: CollectionItem[]; soFar: number; total: number }) => {
-        let graduated = false; // a wishlist item turned into an owned one
+        let graduated = false;
         for (const it of p?.items || []) {
             const key = it.tralbumType + it.tralbumId;
             const existing = itemKeys.get(key);
             if (existing !== undefined) {
-                // wishlist item got purchased (or metadata refreshed): update in
-                // place. the owned copy must be able to CLEAR the wish flag, so
-                // it is recomputed rather than left to the spread.
                 const wasWish = items[existing].wish === true;
                 const merged = { ...items[existing], ...it };
                 merged.wish = it.wish === true;
-                if (merged.downloadUrl) merged.wish = false; // purchased outright
+                if (merged.downloadUrl) merged.wish = false;
                 items[existing] = merged;
                 if (wasWish !== (merged.wish === true)) graduated = true;
                 continue;
@@ -76,9 +72,6 @@ async function load(): Promise<void> {
         }
         if (p?.total) expected = p.total;
         
-        // CRITICAL: Soft render. Only append new items to avoid destroying the open tracklist.
-        // a graduation changes an EXISTING card (heart badge, scope), which the
-        // append-only path would never repaint - rebuild in that case.
         if (graduated) forceRender(); else softRender();
     };
     
@@ -98,14 +91,14 @@ async function load(): Promise<void> {
         loading = false;
         if (items.length) {
             updateHeaderCount();
-            requestIndex(); // tags + track titles for search (disk-cached after first run)
+            requestIndex();
             maybeShowBigCollectionNotice();
         }
     }
 }
 
-// one-time advice for big collections: recommend the permanent release cache.
-let cacheSettingOn = false; // filled from settings:get below
+// one-time advice for big collections: recommend the permanent release cache
+let cacheSettingOn = false;
 function maybeShowBigCollectionNotice(): void {
     if (items.length <= 1000 || cacheSettingOn) return;
     if (localStorage.getItem('bigCollNoticeDismissed') === '1') return;
@@ -130,12 +123,9 @@ function sortedFiltered(): CollectionItem[] {
     const q = searchEl.value.trim().toLowerCase();
     const key = sortEl.value;
     let list = items;
-    // owned / wishlist / local-files scope
     if (scopeEl.value === 'own') list = list.filter((i) => !i.wish && !i.local);
     else if (scopeEl.value === 'wish') list = list.filter((i) => i.wish === true);
     else if (scopeEl.value === 'local') list = list.filter((i) => i.local === true);
-    // match artist/title always; genre tags & track titles once the search index
-    // (built in the background, cached on disk) has that item
     if (q) list = list.filter((i) =>
         (i.artist + ' ' + i.title).toLowerCase().includes(q) ||
         (searchIndex.get(i.tralbumType + i.tralbumId)?.blob || '').includes(q));
@@ -150,11 +140,7 @@ function sortedFiltered(): CollectionItem[] {
     return out;
 }
 
-// terse status line: "importing x/y" while loading, "indexing x/y" while the
-// index builds, else just the release count (filtered as "n / total")
-// pass the already-filtered list when the caller has one: sortedFiltered() is
-// a full filter + sort over the whole collection (thousands of items) and the
-// render path used to run it twice for every batch that streamed in.
+// terse status line ("importing x/y" / "indexing x/y" / release count)
 function updateHeaderCount(precomputed?: CollectionItem[]): void {
     if (loading) { countEl.textContent = `importing ${items.length}/${expected || '?'}`; return; }
     if (indexing) {
@@ -165,14 +151,13 @@ function updateHeaderCount(precomputed?: CollectionItem[]): void {
     const total = list.length === items.length ? String(items.length) : `${list.length} / ${items.length}`;
     countEl.textContent = total + ' releases';
 }
-let indexStatus = ''; // e.g. "throttled (429), resuming in 45s" from main
+let indexStatus = '';
 ipcRenderer.on('collection:index-status', (_e, text: unknown) => {
     indexStatus = typeof text === 'string' ? text : '';
     updateHeaderCount();
 });
 
-// release index (genre tags + tracklist per item), built by main in the
-// background & streamed in. lets the search box match tags and song names.
+// release index (genre tags + tracklist per item), built by main in the background & streamed in
 interface IndexEntry { blob: string; tags: string[]; tracks: [string, number][] }
 const searchIndex = new Map<string, IndexEntry>();
 let indexRequested = false;
@@ -187,16 +172,12 @@ function requestIndex(): void {
 }
 ipcRenderer.on('collection:index', (_e, rows: ({ key: string } & IndexEntry)[]) => {
     for (const r of rows || []) searchIndex.set(r.key, { blob: r.blob || '', tags: r.tags || [], tracks: r.tracks || [] });
-    // an active tag/track search refines live as index entries arrive; the list
-    // view also grows rows, but only refresh it while the user is at the top so
-    // we never yank the scroll position out from under them
     if (viewMode === 'list') { if (grid.scrollTop < 50) forceRender(); else updateHeaderCount(); }
     else if (searchEl.value.trim()) forceRender();
     else updateHeaderCount();
 });
 ipcRenderer.on('collection:index-done', () => {
     indexing = false;
-    // a throttled run stops early; let the next Reload (or app restart) resume it
     if (searchIndex.size < items.length) indexRequested = false;
     updateHeaderCount();
 });
@@ -210,17 +191,14 @@ function createCard(it: CollectionItem): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'artwrap';
     wrap.innerHTML = `<img class="art" loading="lazy" src="${it.art}">`;
-    // dragging a cover exports the full-size art as a real file. hover prefetches
-    // the full-size jpg; dragstart checks (sync) that it's ready and only then
-    // hands the drag to main - startDrag must run inside the live drag gesture,
-    // so if the file isn't there yet the default (thumbnail) drag proceeds.
+    // cover drag-out: hover prefetches the full-size jpg
     const img = wrap.querySelector('img.art') as HTMLImageElement;
     const artReq = { tralbumType: it.tralbumType, tralbumId: it.tralbumId, art: it.art, title: it.title, artist: it.artist };
     img.addEventListener('mouseenter', () => ipcRenderer.send('collection:prefetch-art', artReq), { once: true });
     img.addEventListener('dragstart', (e) => {
         let file = '';
         try { file = ipcRenderer.sendSync('collection:art-ready', artReq) || ''; } catch { /* default drag */ }
-        if (!file) return; // full-size not downloaded yet: browser drag as usual
+        if (!file) return;
         e.preventDefault();
         ipcRenderer.send('collection:drag-art', file);
     });
@@ -269,8 +247,7 @@ function createCard(it: CollectionItem): HTMLElement {
     card.appendChild(meta);
     
     card.addEventListener('click', () => toggleTracklist(it, card));
-    // right-click a cover: add the whole release to a playlist (local cards get
-    // a small menu with a "remove from library" entry too)
+    // right-click a cover: add the whole release to a playlist
     card.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (it.local) openLocalCardMenu(e, it);
@@ -292,8 +269,6 @@ function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
         b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
         menu.appendChild(b);
     };
-    // the picker replaces this menu itself - no closeMenu() here (it would
-    // tear down the picker it just opened)
     mk('Add to playlist…', () => openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId }, e.clientX, e.clientY));
     mk('Remove from library', async () => {
         closeMenu();
@@ -305,7 +280,7 @@ function openLocalCardMenu(e: MouseEvent, it: CollectionItem): void {
     menu.style.top = Math.max(6, Math.min(e.clientY, window.innerHeight - (menu.offsetHeight || 90) - 6)) + 'px';
 }
 
-// CRITICAL FIX: Only appends new items during load so the open tracklist isn't destroyed
+// appends only new items during load so the open tracklist survives
 function softRender(): void {
     const list = sortedFiltered();
     updateHeaderCount(list);
@@ -313,20 +288,13 @@ function softRender(): void {
     if (viewMode === 'list') { renderList(list); return; }
 
     if (!list.length) {
-        // ALWAYS clear stale results. previously, while loading, an unmatched query
-        // returned early and left the previous (shorter-prefix) match rendered -
-        // typing "helloa" kept showing the results for "hello".
         closeTracklist();
         currentlyRenderedCount = 0;
         setState(loading ? 'nothing matches yet - still loading…' : 'nothing matches your search.');
         return;
     }
 
-    // If we are applying a search/sort filter, group headers, or it's the very
-    // first chunk, we MUST wipe the grid.
     if (currentlyRenderedCount === 0 || searchEl.value.trim() !== '' || sortEl.value !== 'added' || gridHeadersOn) {
-        // detach the open tracklist (don't destroy it) so re-renders during load -
-        // new item batches, index updates - can re-seat it instead of closing it
         const openCardId = openId;
         if (tlEl) tlEl.remove();
         grid.innerHTML = '';
@@ -350,10 +318,9 @@ function softRender(): void {
         if (tlEl && openCardId) {
             const card = document.getElementById('card-' + openCardId);
             if (card) endOfRow(card).after(tlEl);
-            else { tlEl.remove(); tlEl = null; openId = ''; } // its item got filtered out
+            else { tlEl.remove(); tlEl = null; openId = ''; }
         }
     } else {
-        // We are streaming in base data without filters. Only append the NEW items to the bottom.
         const newItems = list.slice(currentlyRenderedCount);
         if (newItems.length > 0) {
             const frag = document.createDocumentFragment();
@@ -372,17 +339,9 @@ function forceRender(): void {
     softRender();
 }
 
-// track list view: every track of every (filtered) release as one flat table.
-// track rows come from the release index; releases not indexed yet render as a
-// single album row. the table is VIRTUALIZED: the full row model is computed,
-// but only the rows in (and around) the viewport get DOM - genre grouping
-// duplicates every release under each of its tags, so a big collection easily
-// exceeds 50k rows and a one-shot render froze the view for many seconds.
-// fixed row heights make the offsets exact, so the scrollbar never jumps and
-// jumping to a group is a plain scrollTop seek.
+// track list view: one flat virtualized table
 interface ListRow {
     it: CollectionItem | null; trackIdx: number; title: string; dur: number; isAlbumRow: boolean; genreHead?: string;
-    /** cached lowercase sort keys (localeCompare per comparison was the other half of the freeze) */
     aL?: string; tL?: string; albL?: string;
 }
 let listRows: ListRow[] = [];
@@ -391,9 +350,7 @@ type ListSortKey = 'num' | 'artist' | 'title' | 'album' | 'year' | 'genre' | 'ti
 let listSort: { key: ListSortKey; desc: boolean } = { key: 'artist', desc: false };
 
 
-// grouped sorts (genre / artist / album / year) render a header row per group.
-// genre rows belong to EVERY tag on their release (so a release shows under
-// each of its genres, duplicated); the others have exactly one group.
+// grouped sorts render a header row per group
 function groupLabelsOf(r: ListRow): string[] {
     if (!r.it) return [];
     if (listSort.key === 'genre') {
@@ -410,16 +367,12 @@ const GROUPED_KEYS: ListSortKey[] = ['genre', 'artist', 'album', 'year'];
 
 function applyListSort(rows: ListRow[]): ListRow[] {
     const dir = listSort.desc ? -1 : 1;
-    // plain string compares on the precomputed lowercase keys: localeCompare is
-    // ICU-slow and ran O(n log n) times over tens of thousands of rows
+    // plain string compares on precomputed lowercase keys (localeCompare is slow)
     const cmpStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
     const tiebreak = (a: ListRow, b: ListRow) =>
         cmpStr(a.aL || '', b.aL || '') || cmpStr(a.albL || '', b.albL || '') || a.trackIdx - b.trackIdx;
 
     if (GROUPED_KEYS.includes(listSort.key)) {
-        // bucket rows by group, order groups alphabetically (years numerically),
-        // and emit a header row announcing each group; unknowns always last.
-        // genre buckets a row under EVERY tag of its release (duplicates intended).
         const groups = new Map<string, { label: string; rows: ListRow[] }>();
         for (const r of rows) {
             for (const label of groupLabelsOf(r)) {
@@ -449,7 +402,7 @@ function applyListSort(rows: ListRow[]): ListRow[] {
         listSort.key === 'artist' ? (r.aL || '') :
         listSort.key === 'title' ? (r.tL || '') :
         listSort.key === 'album' ? (r.albL || '') :
-        r.dur; // time
+        r.dur;
     rows.sort((a, b) => {
         const va = val(a), vb = val(b);
         const c = typeof va === 'number' ? (va as number) - (vb as number) : cmpStr(va as string, vb as string);
@@ -470,8 +423,6 @@ function buildListRows(list: CollectionItem[]): ListRow[] {
             rows.push({ it, trackIdx: 0, title: it.title, dur: 0, isAlbumRow: true, aL, tL: albL, albL });
             continue;
         }
-        // when the release only matched the query via its index blob, narrow to the
-        // matching tracks (searching a song name lists that song, not the whole album)
         const releaseMatches = !q || (it.artist + ' ' + it.title).toLowerCase().includes(q)
             || (idx as IndexEntry).tags.join(' ').toLowerCase().includes(q);
         tracks.forEach(([title, dur], i) => {
@@ -487,7 +438,7 @@ function buildListRows(list: CollectionItem[]): ListRow[] {
 // --- virtual scroller for the list view --------------------------------------
 const LV_ROW_H = 34;
 const LV_HEAD_H = 38;
-let lvOffsets: number[] = []; // y of each row inside the spacer
+let lvOffsets: number[] = [];
 let lvSpace: HTMLElement | null = null;
 let lvRangeStart = -1;
 let lvRangeEnd = -1;
@@ -505,7 +456,6 @@ function lvBuildRowEl(i: number): HTMLElement {
         const rowTags = idx ? idx.tags.slice(0, 3) : [];
         const row = document.createElement('div');
         row.className = 'lv-row';
-        // genre cell: each tag is its own link to that genre's group
         const genreHtml = rowTags.map((t) => `<span class="lv-tag" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join(', ');
         row.innerHTML =
             `<span class="lv-num">${r.isAlbumRow ? '' : r.trackIdx + 1}.</span>` +
@@ -579,11 +529,10 @@ function renderList(list: CollectionItem[]): void {
         const sp = document.createElement('span');
         const active = listSort.key === c.key;
         sp.className = (c.cls + (active ? ' on' : '')).trim();
-        // active column shows the arrow svg (flipped via .asc when ascending)
         sp.innerHTML = escapeHtml(c.label) + (active ? sortArrowSvg(!listSort.desc) : '');
         sp.title = 'Sort by ' + c.label;
         sp.addEventListener('click', () => {
-            if (c.key === 'year') requestYears(); // fill missing years like the dropdown did
+            if (c.key === 'year') requestYears();
             if (listSort.key === c.key) listSort.desc = !listSort.desc;
             else listSort = { key: c.key, desc: false };
             forceRender();
@@ -591,8 +540,6 @@ function renderList(list: CollectionItem[]): void {
         head.appendChild(sp);
     }
     grid.appendChild(head);
-    // fixed-height rows -> exact offsets; the spacer owns the full scroll height
-    // and only the visible slice ever exists in the DOM
     lvOffsets = new Array(listRows.length);
     let y = 0;
     for (let i = 0; i < listRows.length; i++) {
@@ -616,7 +563,6 @@ function setViewMode(mode: 'grid' | 'list'): void {
     grid.classList.toggle('listmode', viewMode === 'list');
     viewBtn.innerHTML = viewMode === 'list' ? ICONS.grid : ICONS.list;
     viewBtn.title = viewMode === 'list' ? 'Switch to album grid view' : 'Switch to track list view';
-    // list view sorts via its column headers; the dropdown/direction are grid-only
     sortEl.style.display = viewMode === 'list' ? 'none' : '';
     dirBtn.style.display = viewMode === 'list' ? 'none' : '';
     closeTracklist();
@@ -624,16 +570,12 @@ function setViewMode(mode: 'grid' | 'list'): void {
 }
 viewBtn.addEventListener('click', () => setViewMode(viewMode === 'grid' ? 'list' : 'grid'));
 
-// jump from panel text (artist / album / tag) to its group in the list view:
-// switch to that grouped sort, render everything, and scroll to the group. a
-// clicked tag might not be any release's PRIMARY tag (groups use the primary),
-// so fall back to the nearest alphabetical position instead of not scrolling.
+// jump from panel text to its group in the list view
 function jumpToListGroup(key: ListSortKey, label: string): void {
     listSort = { key, desc: false };
     if (key === 'year') requestYears();
     setViewMode('list');
-    // seek in the row MODEL, not the DOM - with the virtual scroller only the
-    // viewport's rows exist, but every group header is present in listRows
+    // seek in the row MODEL, not the DOM
     const target = label.trim().toLowerCase();
     let exact = -1;
     let nearest = -1;
@@ -643,19 +585,16 @@ function jumpToListGroup(key: ListSortKey, label: string): void {
         lastHead = i;
         const name = (listRows[i].genreHead as string).trim().toLowerCase();
         if (name === target) { exact = i; break; }
-        // first group alphabetically past the target = where it would have been
         if (nearest === -1 && !name.startsWith('(') && name.localeCompare(target) > 0) nearest = i;
     }
     const idx = exact !== -1 ? exact : (nearest !== -1 ? nearest : lastHead);
-    // manual scroll (scrollIntoView would tuck the header under the sticky column bar)
     if (idx !== -1 && lvSpace) {
         grid.scrollTop = Math.max(0, lvSpace.offsetTop + lvOffsets[idx] - 38);
         lvRenderVisible();
     }
 }
 
-// right-click a list row: play / add to queue (the row's single track, or the
-// whole release for not-yet-indexed album rows)
+// right-click a list row: play / add to queue
 function openRowMenu(e: MouseEvent, r: ListRow): void {
     if (!r.it) return;
     const it = r.it;
@@ -680,8 +619,6 @@ function openRowMenu(e: MouseEvent, r: ListRow): void {
     if (!r.isAlbumRow) add('Add whole release to queue', async () => {
         await ipcRenderer.invoke('collection:enqueue', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId });
     });
-    // NOT via add(): add() closes the menu after the callback, which would tear
-    // down the picker the callback just opened (the picker replaces this menu)
     const plb = document.createElement('button');
     plb.className = 'dlfmt';
     plb.textContent = 'Add to playlist…';
@@ -699,9 +636,7 @@ function openRowMenu(e: MouseEvent, r: ListRow): void {
     menu.style.top = Math.max(6, Math.min(e.clientY, window.innerHeight - (menu.offsetHeight || 110) - 6)) + 'px';
 }
 
-// optional group headers in the GRID view (settings toggle; off by default).
-// grouped by the active dropdown sort: date added -> month, artist -> name,
-// title -> first letter, year -> year.
+// optional grid group headers (settings toggle, off by default), keyed off the active sort
 let gridHeadersOn = false;
 function gridGroupLabel(it: CollectionItem): string {
     const key = sortEl.value;
@@ -724,9 +659,7 @@ ipcRenderer.invoke('settings:get').then((s: any) => {
     if (gridHeadersOn && items.length && viewMode === 'grid') forceRender();
 }).catch(() => { /* keep off */ });
 
-// explicitRow: user clicked a specific row of an expanded album tracklist (play
-// that album from there). otherwise a single-track purchase plays JUST its track -
-// the parent album is only resolved for metadata, not queued wholesale.
+// explicitRow = clicked a specific tracklist row (play the album from there)
 async function play(it: CollectionItem, activeIndex = 0, explicitRow = false): Promise<void> {
     const trackOnly = it.tralbumType === 't' && !explicitRow;
     await ipcRenderer.invoke('collection:play', { tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, activeIndex: trackOnly ? undefined : activeIndex, trackOnly });
@@ -789,8 +722,7 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
         it.year = res.year;
         (panel.querySelector('.tlyear') as HTMLElement).textContent = String(res.year);
     }
-    // genre tags: prefer the fresh response, fall back to the local index.
-    // tags / artist / album text link to their group in the list view.
+    // genre tags: prefer the fresh response, fall back to the local index
     const tagList = (res.tags && res.tags.length ? res.tags : searchIndex.get(it.tralbumType + it.tralbumId)?.tags) || [];
     const tagsWrap = panel.querySelector('.tltags') as HTMLElement;
     tagsWrap.innerHTML = '';
@@ -814,7 +746,6 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
 
     right.innerHTML = '';
     if (res.cached) {
-        // network was unavailable: this list came from the saved index
         const note = document.createElement('div');
         note.className = 'tlstate';
         note.textContent = 'offline - showing the saved tracklist';
@@ -834,9 +765,6 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
             e.stopPropagation();
             openPlaylistPicker({ tralbumId: it.tralbumId, tralbumType: it.tralbumType, bandId: it.bandId, trackId: t.id }, e.clientX, e.clientY);
         });
-        // per-song add-to-queue (revealed on row hover); click plays as before.
-        // cached (offline) rows carry no track id, so the button is omitted -
-        // it would queue the whole release instead of the song
         if (t.id) {
             const q = document.createElement('button');
             q.className = 'tlq';
@@ -856,15 +784,12 @@ async function toggleTracklist(it: CollectionItem, card: HTMLElement): Promise<v
     });
 }
 
-// the inline tracklist is inserted after the last card of the opened card's row;
-// when the window is resized the rows re-wrap and that DOM position can land
-// mid-row, leaving a partial row of cards + blank space above the panel. re-seat
-// the panel at the end of the (new) current row after every resize.
+// re-seat the inline tracklist at the end of its card's row after resize (re-wrapping can strand it mid-row)
 function repositionTracklist(): void {
     if (!tlEl || !openId) return;
     const card = document.getElementById('card-' + openId);
     if (!card) return;
-    tlEl.remove(); // detach first so the panel itself doesn't skew row offsets
+    tlEl.remove();
     endOfRow(card).after(tlEl);
 }
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -872,12 +797,12 @@ window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
         repositionTracklist();
-        lvRenderVisible(true); // viewport height changed: refresh the visible slice
+        lvRenderVisible(true);
     }, 80);
 });
 
 let menuEl: HTMLElement | null = null;
-let menuClosedAt = 0; // lets opener buttons act as toggles despite the capture-closer
+let menuClosedAt = 0;
 function closeMenu(): void { if (menuEl) { menuEl.remove(); menuEl = null; menuClosedAt = Date.now(); } }
 
 function positionMenu(menu: HTMLElement, anchor: HTMLElement): void {
@@ -918,11 +843,7 @@ async function openDownloadMenu(it: CollectionItem, anchor: HTMLElement): Promis
     }
     positionMenu(menu, anchor); 
 }
-// CAPTURE phase, with an outside-click check: the tracklist panel (and other
-// zones) stopPropagation on bubble, which used to strand open menus - the
-// playlist picker opened from a track row could only be dismissed by opening
-// another album. capture fires before any stopPropagation can interfere, and
-// the contains() check keeps clicks inside the menu working.
+// CAPTURE phase outside-click closer: the tracklist panel stops propagation on bubble, which stranded open menus
 document.addEventListener('click', (e) => {
     if (menuEl && !menuEl.contains(e.target as Node)) closeMenu();
 }, true);
@@ -938,9 +859,7 @@ document.addEventListener('keydown', (e) => {
     closeTracklist();
 });
 
-// media hotkeys while the collection is focused (space play/pause, ←/→ scrub,
-// shift+←/→ prev/next, shift+↑/↓ volume) forwarded to the player via main.
-// NOTE: keep in sync with preload.ts / player.ts / header.html.
+// media hotkeys while the collection is focused, forwarded to the player
 function mediaHotkeyOf(e: KeyboardEvent): string {
     const t = e.target as HTMLElement | null;
     const tag = t ? t.tagName : '';
@@ -952,7 +871,6 @@ function mediaHotkeyOf(e: KeyboardEvent): string {
     if (e.key === 'ArrowRight') return e.shiftKey ? 'next' : 'seek-fwd';
     if (e.key === 'ArrowUp' && e.shiftKey) return 'vol-up';
     if (e.key === 'ArrowDown' && e.shiftKey) return 'vol-down';
-    // bare digit = jump to that tenth of the track (soundcloud style: 5 -> 50%)
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key >= '0' && e.key <= '9') return 'seek-pct-' + e.key;
     return '';
 }
@@ -998,7 +916,6 @@ scopeEl.addEventListener('change', () => {
 });
 dirBtn.addEventListener('click', () => {
     descending = !descending;
-    // the button holds the arrow svg; ascending just flips it (css .asc)
     dirBtn.classList.toggle('asc', !descending);
     forceRender();
 });
@@ -1026,11 +943,10 @@ function collToast(msg: string): void {
     toastTimer = setTimeout(() => el && el.classList.remove('on'), 2800);
 }
 
-// ⋯ overflow menu: the toolbar was drowning in buttons, so the occasional
-// actions (local file import, reloads, bandcamp playlist import) live here
+// overflow menu for occasional actions
 $('more').addEventListener('click', (e) => {
     e.stopPropagation();
-    if (menuEl || Date.now() - menuClosedAt < 200) { closeMenu(); return; } // toggle
+    if (menuEl || Date.now() - menuClosedAt < 200) { closeMenu(); return; }
     const menu = document.createElement('div');
     menu.className = 'dlmenu';
     menu.addEventListener('click', (ev) => ev.stopPropagation());
@@ -1092,7 +1008,7 @@ ipcRenderer.on('collection:prune', (_e, keep: unknown) => {
 
 // incremental refreshes (wishlist hearts, purchases) stream in outside load()
 ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
-    if (loading) return; // load() has its own listener with progress accounting
+    if (loading) return;
     let added = 0;
     for (const it of p?.items || []) {
         const key = it.tralbumType + it.tralbumId;
@@ -1114,28 +1030,22 @@ ipcRenderer.on('collection:items', (_e, p: { items: CollectionItem[] }) => {
 ipcRenderer.on('collection:load', () => load());
 ipcRenderer.on('collection:shown', () => { if (!items.length) load(); });
 
-// ---- playlists: build & play custom playlists out of your collection --------
-// the panel swaps in for the grid (which keeps rendering hidden underneath, so
-// streaming item batches / index updates never touch playlist DOM). entries are
-// added from anywhere in the collection: right-click a cover or song, the
-// "+ Playlist" button in the tracklist panel, or the list view's row menu.
+// ---- playlists panel (swaps in for the grid) ----------------------------)
 const plov = $('plov');
 let plOpen = false;
-let plDetailId = ''; // '' = browser (all playlists)
+let plDetailId = '';
 let plDragFrom: number | null = null;
-let plPrevScope = 'all'; // scope to restore when leaving the playlists view
+let plPrevScope = 'all';
 
 interface PlSummary { id: string; name: string; count: number; duration: number; arts: string[]; desc: string; cover: string }
 interface PlEntry { id: string; title: string; artist: string; album: string; art: string; duration: number }
 interface PlAddReq { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }
 
-// the playlists view lives under the scope dropdown ("Playlists" option); the
-// grid keeps rendering hidden underneath. leaving restores the previous scope.
+// the playlists view lives under the scope dropdown
 function setPlaylistsOpen(open: boolean): void {
     plOpen = open;
     plov.style.display = open ? '' : 'none';
     grid.style.display = open ? 'none' : '';
-    // search/sort/direction/viewmode act on the grid, not playlists - hide them
     searchEl.style.display = open ? 'none' : '';
     viewBtn.style.display = open ? 'none' : '';
     sortEl.style.display = open || viewMode === 'list' ? 'none' : '';
@@ -1162,7 +1072,7 @@ const fmtLong = (secs: number): string => {
     return h ? `${h}h ${m}m` : `${m}m`;
 };
 
-// 2×2 art collage; a custom cover (or a single art) renders full-bleed instead
+// 2×2 art collage
 function plCollage(arts: string[], cover = ''): HTMLElement {
     const cov = document.createElement('div');
     cov.className = 'pl-cover';
@@ -1235,7 +1145,7 @@ async function renderPlaylistDetail(id: string): Promise<void> {
     back.title = 'All playlists';
     back.addEventListener('click', () => void renderPlaylistBrowser());
     head.appendChild(back);
-    // cover: custom image when set, else the entry-art collage. click to change.
+    // cover: custom image when set, else the entry-art collage
     const cov = plCollage([...new Set(p.entries.map((e) => e.art).filter(Boolean))], p.coverUrl || '');
     cov.classList.add('sm', 'clickable');
     cov.title = 'Change cover';
@@ -1286,14 +1196,14 @@ async function renderPlaylistDetail(id: string): Promise<void> {
     meta.textContent = p.entries.length + (p.entries.length === 1 ? ' track' : ' tracks') + (dur ? ' · ' + fmtLong(dur) : '');
     twrap.appendChild(title);
     twrap.appendChild(meta);
-    // description under the title; click to edit (multiline)
+    // description under the title
     const desc = document.createElement('div');
     desc.className = 'pl-desc' + (p.desc ? '' : ' empty');
     desc.textContent = p.desc || 'Add a description…';
     desc.title = 'Edit description';
     desc.addEventListener('click', async () => {
         const d = await textPrompt('Playlist description', p.desc || '', true);
-        if (d === null) return; // cancelled ('' clears)
+        if (d === null) return;
         await ipcRenderer.invoke('playlists:set-desc', { id, desc: d });
         void renderPlaylistDetail(id);
     });
@@ -1316,8 +1226,6 @@ async function renderPlaylistDetail(id: string): Promise<void> {
         b.textContent = r && r.ok ? 'added ✓' : 'failed';
         setTimeout(() => { b.textContent = 'Queue'; }, 900);
     });
-    // downloads the tracks in order + playlist-cover.png + description.txt +
-    // the order file (m3u/pls/… per the download settings)
     act('Download', '', async (b) => {
         const r = await ipcRenderer.invoke('playlists:download', id);
         b.textContent = r && r.ok ? 'started ✓' : '× ' + ((r && r.error) || 'failed');
@@ -1395,8 +1303,7 @@ async function renderPlaylistDetail(id: string): Promise<void> {
     });
 }
 
-// pick a playlist to add a release/track to. opened by right-click on covers,
-// tracklist rows & list-view rows, and the tracklist panel's "+ Playlist".
+// pick a playlist to add a release/track to
 async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<void> {
     closeMenu();
     const menu = document.createElement('div');
@@ -1421,7 +1328,7 @@ async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<
         menu.appendChild(b);
     };
     const res = await ipcRenderer.invoke('playlists:all').catch(() => null);
-    if (menuEl !== menu) return; // superseded by another menu
+    if (menuEl !== menu) return;
     const lists: PlSummary[] = (res && res.playlists) || [];
     for (const pl of lists) {
         addRow(pl.name, async (b) => {
@@ -1447,9 +1354,7 @@ async function openPlaylistPicker(req: PlAddReq, x: number, y: number): Promise<
     place();
 }
 
-// window.prompt doesn't exist in electron renderers: tiny one-field modal.
-// resolves the trimmed text ('' allowed - that's how a description is cleared)
-// or null when cancelled. multiline uses a textarea (Ctrl+Enter submits).
+// window.prompt doesn't exist in electron renderers: tiny one-field modal
 function textPrompt(title: string, initial: string, multiline = false): Promise<string | null> {
     return new Promise((resolve) => {
         const back = document.createElement('div');
@@ -1464,7 +1369,6 @@ function textPrompt(title: string, initial: string, multiline = false): Promise<
             `<button class="m-ok primary">OK</button>` +
             `<button class="m-cancel">Cancel</button></div></div>`;
         (back.querySelector('h3') as HTMLElement).textContent = title;
-        // (textarea shares every member used here; one type keeps listeners simple)
         const input = back.querySelector(multiline ? 'textarea' : 'input') as HTMLInputElement;
         input.value = initial;
         let settled = false;
@@ -1473,7 +1377,7 @@ function textPrompt(title: string, initial: string, multiline = false): Promise<
         back.querySelector('.m-cancel')!.addEventListener('click', () => done(null));
         back.addEventListener('click', (e) => { e.stopPropagation(); if (e.target === back) done(null); });
         input.addEventListener('keydown', (e) => {
-            e.stopPropagation(); // keep esc/media hotkeys from firing behind the modal
+            e.stopPropagation();
             if (e.key === 'Enter' && (!multiline || e.ctrlKey || e.metaKey)) done(input.value.trim());
             if (e.key === 'Escape') done(null);
         });

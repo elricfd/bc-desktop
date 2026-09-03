@@ -10,11 +10,9 @@
             background: #181a1b; color: #fff;
             font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Roboto, sans-serif;
             font-size: 13px;
-            /* ctrl+a used to select the whole chrome (incl the close btn); only let inputs be selected */
             user-select: none;
         }
         input { user-select: text; }
-        /* our own titlebar so the native (windows) close btn can't stick highlighted */
         .titlebar {
             -webkit-app-region: drag;
             display: flex; align-items: center; justify-content: space-between;
@@ -29,17 +27,12 @@
             display: flex; align-items: center; justify-content: center; cursor: pointer;
         }
         .titlebar .winclose:hover { background: #e81123; color: #fff; }
-        /* mac: frameless windows have ~10px rounded corners; a boxy hover in that
-           corner clashes, so use a small inset circle instead */
         body.mac .titlebar .winclose { width: 22px; height: 22px; margin-right: 4px; border-radius: 50%; font-size: 12px; }
         .body { padding: 22px; }
         h1 { font-size: 16px; margin-bottom: 4px; }
         .hint { color: #848079; font-size: 11px; margin-bottom: 18px; line-height: 1.5; }
-        /* inline hint under a control: tight, never a paragraph */
         .hint.tight { margin: 5px 0 0; line-height: 1.4; }
-        /* group separator inside a section */
         .divider { height: 1px; background: #2a2e30; margin: 16px -16px; }
-        /* small caps label for a group of related controls */
         .grp { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: #6f6b64; margin: 0 0 10px; }
         .hint code { color: #b7b2a8; background: #121415; padding: 1px 4px; border-radius: 3px; }
         .section { border: 1px solid #2a2e30; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
@@ -231,8 +224,6 @@
     <!-- /.body -->
 
     <script>
-        // if renderer isnt node integrated, require() throws and whole
-        // script dies which looks exactly like "save does nothing
         let ipcRenderer;
         try {
             ipcRenderer = require('electron').ipcRenderer;
@@ -244,12 +235,11 @@
         const $ = (id) => document.getElementById(id);
         const log = (m) => { try { ipcRenderer && ipcRenderer.send('settings:log', m); } catch (e) {} };
 
-        // keybind capture: click a button, press the combo. stored as
-        // "Ctrl+Shift+X" strings matching main's accelOfInput format.
+        // keybind capture: click a button, press the combo
         const KB_DEFAULTS = { collection: 'Ctrl+Shift+C', feed: 'Ctrl+Shift+F', home: 'Ctrl+Shift+H', downloads: 'Ctrl+Shift+D', search: 'Ctrl+K' };
         const KB_IDS = { collection: 'kbCollection', feed: 'kbFeed', home: 'kbHome', downloads: 'kbDownloads', search: 'kbSearch' };
         let kbState = Object.assign({}, KB_DEFAULTS);
-        let kbRecording = null; // action name while capturing
+        let kbRecording = null;
         function kbRender() {
             for (const k in KB_IDS) {
                 const b = $(KB_IDS[k]);
@@ -265,16 +255,14 @@
         document.addEventListener('keydown', (e) => {
             if (!kbRecording) return;
             e.preventDefault(); e.stopPropagation();
-            // Esc / Backspace / Delete REMOVE the binding ("none" = disabled);
-            // cancelling a recording is done by clicking the button again
             if (e.key === 'Escape' || e.key === 'Backspace' || e.key === 'Delete') {
                 kbState[kbRecording] = '';
                 kbRecording = null;
                 kbRender();
                 return;
             }
-            if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for the real key
-            if (!e.ctrlKey && !e.altKey && !e.metaKey) return; // must include a real modifier
+            if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+            if (!e.ctrlKey && !e.altKey && !e.metaKey) return;
             const parts = [];
             if (e.ctrlKey) parts.push('Ctrl');
             if (e.altKey) parts.push('Alt');
@@ -286,7 +274,6 @@
             kbRender();
         }, true);
 
-        // custom titlebar close (frameless window)
         if (typeof process !== 'undefined' && process.platform === 'darwin') document.body.classList.add('mac');
         $('winClose').onclick = () => { try { ipcRenderer && ipcRenderer.send('settings:close'); } catch (e) {} };
 
@@ -322,7 +309,7 @@
                 item.onclick = async () => {
                     currentHbState[key] = !currentHbState[key];
                     renderWbLists();
-                    await persist(); // Instantly apply when interacting with visual controller
+                    await persist();
                 };
                 if (currentHbState[key]) enabledList.appendChild(item);
                 else disabledList.appendChild(item);
@@ -348,8 +335,6 @@
             $('apiSecret').value = lfm.apiSecret || '';
             $('lfmEnabled').checked = lfm.enabled !== false;
             $('minScrobbleLen').value = lfm.minScrobbleLen == null ? 30 : lfm.minScrobbleLen;
-            // scrobbler health: every failure in the scrobble path is non-fatal,
-            // so this line is the only place a broken setup becomes visible
             const lst = s.lastfmStatus || {};
             if (!lst.ready) {
                 $('lfmStatus').textContent = 'not scrobbling: ' + (lst.reason || 'unknown');
@@ -385,9 +370,7 @@
             $('autoLoadCollection').checked = s.autoLoadCollection === true;
             $('cacheReleases').checked = s.cacheReleases === true;
             refreshCacheInfo();
-            $('darkMode').checked = s.theme !== 'light'; // dark by default
-            // stored setting is "apply dark to artist pages" (default off); the
-            // checkbox is the inverse ("disable…"), so it starts checked
+            $('darkMode').checked = s.theme !== 'light';
             $('noDarkArtistPages').checked = s.darkArtistPages !== true;
             $('downloadDir').value = s.downloadDir || '';
             if (lfm.username) { $('lfmUser').textContent = 'connected: ' + lfm.username; $('lfmUser').className = 'status ok'; }
@@ -405,7 +388,6 @@
             const syncTagOpts = () => { $('tagOpts').style.opacity = $('modifyTags').checked ? '1' : '.4'; };
             $('modifyTags').addEventListener('change', syncTagOpts);
             syncTagOpts();
-            // music-folder scan: OFF by default; the folder row dims until enabled
             $('musicFolderScan').checked = s.musicFolderScan === true;
             $('musicFolder').value = s.musicFolder || '';
             const syncScanOpts = () => { $('musicFolderOpts').style.opacity = $('musicFolderScan').checked ? '1' : '.4'; };

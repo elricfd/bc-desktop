@@ -1,7 +1,7 @@
 import type { Session } from 'electron';
 import type { PlayerTrack, TralbumType, CollectionItem, DownloadFormat, FeedStory } from '../shared/types';
 
-// mirrors res strat used by bandcamp player ext: hit cred tralbum endpoints to obtain full tracklist (w/ direct stream urls) for release. this is what lets player advance thru album or collection w/out scraping per track dom.
+// hits the credentialed tralbum endpoints for full tracklists
 
 interface TralbumQuery {
     bandId?: string;
@@ -12,7 +12,7 @@ interface TralbumQuery {
 
 const STREAM_PREFERENCE = ['mp3-128', 'mp3-v0', 'mp3-320'];
 
-// how long fetched tracklist / track -> album map stays fresh. mirrors ext tralbum cache ttl ms so repeated traps of same release (or player's per track fallback) never rehit network.
+// tracklist / track->album cache ttl: repeated traps of the same release never rehit the network
 const CACHE_TTL_MS = 15 * 60 * 1000;
 
 function toId(value: unknown): string {
@@ -32,19 +32,17 @@ function pickStream(file: any): string {
 }
 
 export class BandcampApi {
-    // main proc owns content view session; we reuse it so reqs carry fan login cookies (priv streams resolve correctly).
     constructor(private readonly getSession: () => Session | null) {}
 
-    /** set by main: called whenever bandcamp answers HTTP 429 (drives the user-facing notice). */
     on429?: () => void;
     private notify429(status: number): void {
         if (status === 429) { try { this.on429?.(); } catch { /* notifier failed */ } }
     }
 
-    // cache full tracklists by `${type}:${tralbumId}` and track -> album map by track id. both expire after cache ttl ms.
+    // cache full tracklists by `${type}:${tralbumId}` and track -> album map by track id
     private readonly tralbumCache = new Map<string, { tracks: PlayerTrack[]; at: number }>();
     private readonly albumOfTrack = new Map<string, { albumId: string; bandId: string; at: number }>();
-    // release year by `${type}:${id}` (bandcamp's collection api omits release dates, so we read them from the tralbum endpoint on demand)
+    // release year by `${type}:${id}`
     private readonly yearCache = new Map<string, number>();
 
     // pull the release *year* out of a tralbum payload (string date or unix ts)
@@ -77,12 +75,6 @@ export class BandcampApi {
         return this.yearCache.get(key) || 0;
     }
 
-    /**
-     * release details for one collection/feed item: genre tags, tracklist
-     * (title+duration), release year & about text. drives the collection's search
-     * index / list view and the feed's expanded cards. status-aware so the bulk
-     * index builder can back off on 429 instead of silently losing items.
-     */
     async fetchSearchIndex(q: TralbumQuery, interactive = false): Promise<
         { ok: true; tags: string[]; tracks: { title: string; duration: number }[]; year: number; about: string }
         | { ok: false; retryable: boolean }
@@ -95,8 +87,6 @@ export class BandcampApi {
         for (const type of types) {
             for (const url of this.attemptUrls(type, id, q.bandId)) {
                 let { data, status } = await this.fetchRawFromStatus(url);
-                // a user's click retries through a 429 (the crawler yields to us);
-                // the bulk crawler instead returns retryable & backs off itself
                 if (status === 429 && interactive) {
                     for (let attempt = 0; attempt < 3 && status === 429; attempt++) {
                         await new Promise((res) => setTimeout(res, 800 * Math.pow(2, attempt)));
@@ -110,7 +100,7 @@ export class BandcampApi {
                     .map((t: any) => String((t && (t.name || t.norm_name)) || '').trim())
                     .filter(Boolean);
                 const rows: any[] = Array.isArray(data.trackinfo) ? data.trackinfo : Array.isArray(data.tracks) ? data.tracks : [];
-                if (!tags.length && !rows.length) continue; // thin payload; try the next endpoint
+                if (!tags.length && !rows.length) continue;
                 const year = this.extractYear(data);
                 if (year) this.yearCache.set(`${q.tralbumType}:${id}`, year);
                 return {
@@ -125,7 +115,6 @@ export class BandcampApi {
                 };
             }
         }
-        // real payloads but no tags/tracks anywhere: cache the emptiness (not retryable)
         if (sawData) return { ok: true, tags: [], tracks: [], year: 0, about: '' };
         return { ok: false, retryable: false };
     }
@@ -156,9 +145,6 @@ export class BandcampApi {
             u.searchParams.set('tralbum_id', tralbumId);
             u.searchParams.set('tralbum_type', type);
         }
-        // web (info) endpoint first: its `artist` is the release's own artist (e.g. a
-        // side-project on a label's page), whereas mobile's tralbum_artist is the band
-        // - using mobile first showed the band name instead of the release artist.
         return [info.toString(), mobile.toString()];
     }
 
@@ -171,10 +157,6 @@ export class BandcampApi {
             if (!res.ok) { this.notify429(res.status); return { data: null, status: res.status }; }
             const data: any = await res.json();
             if (!data || typeof data !== 'object') return { data: null, status: res.status };
-            // bandcamp returns 200 with {error:true,error_message:...} for bad/retired
-            // endpoints (tralbum/2/info now answers "bad function"). treating that as
-            // data poisoned every fallback: track→album lookups died, so collection
-            // track items played with the page/band artist instead of the release's.
             if (data.error) return { data: null, status: res.status };
             return { data, status: res.status };
         } catch {
@@ -182,18 +164,12 @@ export class BandcampApi {
         }
     }
 
-    // user-initiated fetches note themselves here; the background index crawler
-    // yields while this is fresh so interactive actions (opening a tracklist,
-    // paging the feed) never lose the 429 budget to the crawl.
+    // user-initiated fetches note themselves here
     private lastInteractiveAt = 0;
     noteInteractive(): void { this.lastInteractiveAt = Date.now(); }
     interactiveIdleMs(): number { return Date.now() - this.lastInteractiveAt; }
 
-    /**
-     * GET one endpoint & return its json object (or null). used by the
-     * user-initiated paths, so it marks interactive activity & retries 429s
-     * with a short backoff instead of failing the user's click.
-     */
+    // GET one endpoint -> json or null
     private async fetchRawFrom(url: string): Promise<any | null> {
         this.noteInteractive();
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -205,7 +181,7 @@ export class BandcampApi {
         return null;
     }
 
-    /** fetch raw tralbum payload for single (type, id) used to read parent album id of track before fetching full album. */
+    /** raw tralbum payload for one (type, id). */
     private async fetchRaw(type: TralbumType, tralbumId: string, bandId?: string): Promise<any | null> {
         if (!tralbumId) return null;
         for (const url of this.attemptUrls(type, tralbumId, bandId)) {
@@ -224,10 +200,6 @@ export class BandcampApi {
 
         const types: TralbumType[] = q.tralbumType === 't' ? ['t', 'a'] : ['a', 't'];
         for (const type of types) {
-            // try EACH endpoint (web then mobile) and use the first that yields
-            // tracks. going through fetchRaw returned the first *object* the web
-            // endpoint gave - if that was a trackless/error payload, the mobile
-            // endpoint was never tried and the tracklist came back empty.
             for (const url of this.attemptUrls(type, q.tralbumId, q.bandId)) {
                 const data = await this.fetchRawFrom(url);
                 if (!data) continue;
@@ -235,10 +207,8 @@ export class BandcampApi {
                 if (!tracks.length) continue;
                 const at = Date.now();
                 this.tralbumCache.set(primaryKey, { tracks, at });
-                // also key by album id actually returned so track id lookup and later album id lookup share 1 cache entry.
                 const realId = toId((data && (data.id ?? data.tralbum_id)) || q.tralbumId);
                 if (realId) this.tralbumCache.set(`${type}:${realId}`, { tracks, at });
-                // cache the release year while we have the payload
                 const yr = this.extractYear(data);
                 this.yearCache.set(primaryKey, yr);
                 if (realId) this.yearCache.set(`${type}:${realId}`, yr);
@@ -259,9 +229,6 @@ export class BandcampApi {
         return tracks[0];
     }
 
-    /**
-     * build full album q from just track id. this is what makes collection, feed, discover and fan collection playlist surfaces play clicked release in full none of them expose tracklist in page so we look track up, find parent album, and fetch whole album.
-     */
     async resolveQueueForTrack(
         trackId: string,
         bandId?: string
@@ -269,7 +236,6 @@ export class BandcampApi {
         const tId = toId(trackId);
         if (!tId) return { tracks: [], activeIndex: 0 };
 
-        // reuse known track -> album map so retrap of same track skips discovery fetch entirely.
         const mapped = this.albumOfTrack.get(tId);
         if (mapped && Date.now() - mapped.at <= CACHE_TTL_MS) {
             const tracks = await this.fetchTralbum({
@@ -298,17 +264,11 @@ export class BandcampApi {
             }
         }
 
-        // standalone track (no album or album fetch failed): q it alone but w/ proper metadata + real stream url.
         const single = this.normalize(trackData, { tralbumId: tId, tralbumType: 't', bandId: resolvedBand });
         return { tracks: single, activeIndex: 0 };
     }
 
-    /**
-     * resolve the tracklist for a bandcamp release/track *page url* (used by
-     * add-to-queue on links & release pages). reads the page's embedded TralbumData
-     * blob (data-tralbum on modern pages) so we get real stream urls without knowing
-     * the tralbum id up front.
-     */
+    // tracklist for a release/track *page url*
     async fetchTracksFromUrl(pageUrl: string): Promise<PlayerTrack[]> {
         const session = this.getSession();
         if (!session || !pageUrl) return [];
@@ -338,7 +298,7 @@ export class BandcampApi {
         });
     }
 
-    /** resolve a bandcamp page url for a track/release that shipped without one (e.g. homepage playlist rows) so the player's title/artist links work. */
+    /** resolve a page url for a track/release that shipped without one. */
     async resolvePageUrl(q: { trackId?: string; bandId?: string; tralbumId?: string; tralbumType?: TralbumType }): Promise<string> {
         const bandId = q.bandId;
         const tId = toId(q.trackId);
@@ -366,10 +326,6 @@ export class BandcampApi {
         const tralbumType: TralbumType =
             (data.item_type || data.tralbum_type || q.tralbumType) === 't' ? 't' : 'a';
 
-        // prefer the release's own artist (current.artist / artist) over the band /
-        // tralbum_artist so a side-project or various-artists release shows its real
-        // artist, not the page/label name. tralbum_artist/band.name are fallbacks for
-        // the mobile endpoint shape.
         const artist = (
             current.artist || data.artist || data.tralbum_artist ||
             data.band_name || (data.band && data.band.name) || 'Bandcamp'
@@ -408,20 +364,15 @@ export class BandcampApi {
         return tracks;
     }
 
-    // fan collection (for custom sortable collection view)
 
     /** norm 1 fancollection item (same shape as page item cache). */
     private normalizeCollectionItem(it: any, redownloadUrls: Record<string, string>): CollectionItem {
         const type: TralbumType = (it.item_type === 'track' || it.tralbum_type === 't') ? 't' : 'a';
         const artId = toId(it.item_art_id ?? it.art_id);
         const added = Date.parse(it.purchased || it.added || it.date_added || '') || 0;
-        // release year: bandcamp's collection api usually omits it, so this is often 0
-        // and gets filled in later by fetchReleaseYear (see collection:enrich-years).
-        // deliberately NOT falling back to the added date - that made "sort by year"
-        // behave like "sort by date added".
         const rel = it.release_date || it.releaseDate || '';
         const year = Number(String(rel).match(/\b(19|20)\d{2}\b/)?.[0]) || 0;
-        // redownload key is sale_item_type + sale_item_id, e.g. c173525240
+        // redownload key is sale_item_type + sale_item_id
         const saleKey = (it.sale_item_type || '') + toId(it.sale_item_id);
         return {
             itemId: toId(it.item_id ?? it.tralbum_id),
@@ -438,17 +389,6 @@ export class BandcampApi {
         };
     }
 
-    /**
-     * fetch fan entire collection via fancollection api (page only embeds first ~20). resolves fan id + total count from cred collection summary endpoint then pages thru collection items.
-     *
-     * prev impl broke on any transient !ok (esp http 429) mid paginate, truncating collection to whatever it had (hence 580 / 1265 of 2780). now: big page size (fewer reqs = faster & less likely throttled) + per page retry w/ backoff so a single hiccup can't cut the run short. onprogress reports running count to view.
-     */
-    /**
-     * stopAtKeys: keys ("<type><id>") already known to the caller. the collection
-     * api pages newest-first, so hitting a known item means everything after it is
-     * already cached - stop there. this is what makes Reload/startup an
-     * incremental "check for new purchases" instead of a full re-scan.
-     */
     async fetchCollection(
         maxItems = 20000,
         onProgress?: (added: CollectionItem[], soFar: number, total: number) => void,
@@ -467,16 +407,13 @@ export class BandcampApi {
             if (r.ok) {
                 const d: any = await r.json();
                 fanId = toId(d?.fan_id ?? d?.collection_summary?.fan_id);
-                // summary lists every owned tralbum keyed by <type><id>; its size is the real count to page toward
                 const lookup = d?.collection_summary?.tralbum_lookup;
                 if (kind === 'collection' && lookup && typeof lookup === 'object') total = Object.keys(lookup).length;
             }
         } catch {
-            // fall thru
         }
         if (!fanId) return [];
 
-        // pull one page w/ retry: only give up on a page after several failed attempts (backoff) so throttling can't silently truncate the collection
         const COUNT = 500;
         const fetchPage = async (token: string): Promise<any | null> => {
             for (let attempt = 0; attempt < 6; attempt++) {
@@ -489,10 +426,8 @@ export class BandcampApi {
                     } as any);
                     if (r.ok) return await r.json();
                     this.notify429(r.status);
-                    // 429 / 5xx: back off & retry rather than abandoning the whole collection
                     if (r.status !== 429 && r.status < 500) return null;
                 } catch {
-                    // network blip: retry
                 }
                 await new Promise((res) => setTimeout(res, 400 * Math.pow(2, attempt)));
             }
@@ -514,9 +449,6 @@ export class BandcampApi {
             let hitKnown = false;
             for (const it of items) {
                 const c = this.normalizeCollectionItem(it, redl);
-                // ALWAYS explicit: an owned payload that merely omitted the key
-                // could not clear a stale wish flag when merged over the old
-                // copy (buying a wishlisted album left it in the wishlist).
                 c.wish = kind === 'wishlist';
                 const key = c.tralbumType + c.tralbumId;
                 if (!c.tralbumId || seen.has(key)) continue;
@@ -529,11 +461,8 @@ export class BandcampApi {
                 if (onProgress && added.length) onProgress(added, out.length, out.length);
                 return out;
             }
-            // hand each page to the caller as it arrives so the view can render
-            // progressively instead of blocking on the whole (multi-request) fetch
             if (onProgress) onProgress(added, out.length, Math.max(total, out.length));
             const next = data?.last_token || '';
-            // stop on no more, empty token, or a token that didn't advance (guards against a stuck cursor looping forever)
             if (!data?.more_available || !next || seenTokens.has(next)) break;
             seenTokens.add(next);
             token = next;
@@ -592,7 +521,6 @@ export class BandcampApi {
                 if (m) { this.cachedFanUsername = m[1]; return m[1]; }
             }
         } catch { /* try the redirect below */ }
-        // last resort: bandcamp redirects /feed to the logged-in fan's feed page
         try {
             const r = await session.fetch('https://bandcamp.com/feed', { credentials: 'include' } as any);
             const m = String((r as any).url || '').match(/bandcamp\.com\/([^/?#]+)\/feed/i);
@@ -601,12 +529,7 @@ export class BandcampApi {
         return this.cachedFanUsername;
     }
 
-    /**
-     * bandcamp's dash feed is a stored SNAPSHOT that only regenerates when the
-     * fan's feed page is actually visited - fan_dash_feed_updates just reads it.
-     * without this poke the feed ended at whenever the user last opened
-     * bandcamp's own feed page (newer releases simply weren't in the snapshot).
-     */
+    // bandcamp's dash feed is a stored snapshot that only regenerates on a feed page visit
     private async regenerateFeed(): Promise<void> {
         const session = this.getSession();
         if (!session) return;
@@ -614,7 +537,7 @@ export class BandcampApi {
             const name = await this.getFanUsername();
             const url = name ? `https://bandcamp.com/${encodeURIComponent(name)}/feed` : 'https://bandcamp.com/feed';
             const r = await session.fetch(url, { credentials: 'include' } as any);
-            await r.text(); // consume - the page visit itself triggers regeneration
+            await r.text();
         } catch { /* snapshot stays stale; updates endpoint still works */ }
     }
 
@@ -655,18 +578,12 @@ export class BandcampApi {
         };
     }
 
-    /**
-     * one page of the fan feed (stories from artists & fans you follow) via the
-     * same endpoint bandcamp's own "older stories" button posts to. olderThan is
-     * the unix ts to page back from (0/omitted = newest).
-     */
     async fetchFeed(olderThan = 0): Promise<{ ok: boolean; stories: FeedStory[]; oldest: number; error?: string }> {
         const session = this.getSession();
         if (!session) return { ok: false, stories: [], oldest: 0, error: 'no session' };
         const fanId = await this.getFanId();
         if (!fanId) return { ok: false, stories: [], oldest: 0, error: 'not logged in' };
-        this.noteInteractive(); // feed paging is user-driven: crawler yields to it
-        // first page of a load/reload: poke the feed page so the snapshot is fresh
+        this.noteInteractive();
         if (!(olderThan > 0)) await this.regenerateFeed();
         let data: any = null;
         try {
@@ -683,14 +600,13 @@ export class BandcampApi {
                 } as any);
                 if (r.ok) { data = await r.json(); break; }
                 this.notify429(r.status);
-                // throttled: retry a few times with backoff before giving up
                 if (r.status !== 429 || attempt >= 3) return { ok: false, stories: [], oldest: 0, error: 'http ' + r.status };
                 await new Promise((res) => setTimeout(res, 1000 * Math.pow(2, attempt)));
             }
         } catch (e: any) {
             return { ok: false, stories: [], oldest: 0, error: e?.message || 'feed fetch failed' };
         }
-        // entries live under .stories on the web endpoint; be lenient about shape
+        // entries live under .stories on the web endpoint
         const root = (data && typeof data === 'object' && (data.stories || data)) || {};
         const rawEntries: any[] = Array.isArray(root.entries) ? root.entries
             : Array.isArray(root.stories) ? root.stories
@@ -710,10 +626,7 @@ export class BandcampApi {
 
     // --- global search (bandcamp's public search api) -------------------------
 
-    /**
-     * site-wide search via bandcamp's own public endpoint (the one their search
-     * box uses). filter: '' all, 't' tracks, 'a' albums, 'b' artists/labels.
-     */
+    // site-wide search via bandcamp's public endpoint
     async searchPublic(text: string, filter: '' | 't' | 'a' | 'b' = ''): Promise<{
         ok: boolean;
         results: { type: string; id: string; name: string; band: string; album: string; art: string; url: string; bandId: string; albumId: string }[];
@@ -721,7 +634,7 @@ export class BandcampApi {
     }> {
         const session = this.getSession();
         if (!session || !text.trim()) return { ok: false, results: [], error: 'no query' };
-        this.noteInteractive(); // user-driven: the index crawler yields
+        this.noteInteractive();
         try {
             const r = await session.fetch('https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic', {
                 method: 'POST',
@@ -735,10 +648,6 @@ export class BandcampApi {
             return {
                 ok: true,
                 results: rows.map((x: any) => {
-                    // the api's `img` field uses the no-prefix image-id form, which
-                    // only exists for band/fan photos - for tracks/albums it 404s
-                    // (dead icons). release art must be built from art_id with the
-                    // `a` prefix.
                     const artId = toId(x.art_id);
                     const isRelease = x.type === 't' || x.type === 'a';
                     const art = isRelease
@@ -780,8 +689,7 @@ export class BandcampApi {
 
     // --- downloads (purchased items) ----------------------------------------
 
-    // fetch a download page & pull its per-format popplers urls. downloadPageUrl
-    // is the redownload_url from the collection (bandcamp.com/download?...).
+    // fetch a download page & pull its per-format popplers urls
     async fetchDownloadFormats(downloadPageUrl: string): Promise<DownloadFormat[]> {
         const session = this.getSession();
         if (!session || !downloadPageUrl) return [];
@@ -793,7 +701,6 @@ export class BandcampApi {
         } catch {
             return [];
         }
-        // the page carries a #pagedata data-blob with digital_items[].downloads
         const m = html.match(/id="pagedata"[^>]*data-blob="([^"]*)"/);
         if (!m) return [];
         let blob: any;
@@ -812,9 +719,6 @@ export class BandcampApi {
         return out;
     }
 
-    // some formats aren't encoded yet; the download url has a sibling statdownload
-    // endpoint that reports ready + the final file url. poll it, then fall back to
-    // the raw url (bandcamp also streams the zip directly once prepared).
     async prepareDownload(
         formatUrl: string,
         opts?: { onWait?: (secondsWaited: number) => void; canceled?: () => boolean }
@@ -827,14 +731,13 @@ export class BandcampApi {
             try {
                 const r = await session.fetch(statUrl, { credentials: 'include' } as any);
                 const text = await r.text();
-                const jm = text.match(/\{[\s\S]*\}/); // strip any jsonp wrapper
+                const jm = text.match(/\{[\s\S]*\}/);
                 if (jm) {
                     const j = JSON.parse(jm[0]);
                     if (j.result === 'ok' && (j.download_url || j.url)) return (j.download_url || j.url).toString();
                     if (j.result === 'err') return formatUrl;
                 }
             } catch {
-                // keep polling
             }
             await new Promise((res) => setTimeout(res, 2000));
             opts?.onWait?.((i + 1) * 2);
@@ -843,19 +746,13 @@ export class BandcampApi {
     }
 }
 
-// --- bandcamp fan playlist page parsing --------------------------------------
-// a /playlist/<id> page ships a data-blob attribute whose appData carries the
-// playlist (title/description/imageId) and every track with its band id, parent
-// album id, art id and duration - exactly the resolver handles our own playlist
-// entries store. stream urls in the blob are short-lived and deliberately
-// ignored; playback resolves lazily like everything else.
+// --- bandcamp fan playlist page parsing ----------------------------------
 
 export interface BandcampPlaylistTrack {
     id: string;
     title: string;
     artist: string;
     album: string;
-    /** parent album id; '' for standalone tracks */
     albumId: string;
     bandId: string;
     artId: string;
@@ -881,7 +778,6 @@ export function playlistPageError(error: string): BandcampPlaylistPage {
 export function parseBandcampPlaylistHtml(html: string): BandcampPlaylistPage {
     const m = String(html || '').match(/data-blob="([^"]+)"/);
     if (!m) return playlistPageError('no page data found (is that a playlist url?)');
-    // attribute unescape: &amp; strictly LAST or "&amp;quot;" double-unescapes
     return parseBandcampPlaylistBlob(m[1]
         .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
         .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
