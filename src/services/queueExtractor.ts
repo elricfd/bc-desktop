@@ -1,21 +1,4 @@
-// produces js injected into content view when audio stream is
-// trapped. it runs in page own context (bandcamp.com origin) so it can read
-// page embedded data & when needed fetch full tracklist from
-// bandcamp api w/ fan cookies exactly how bandcamp player ext
-// resolves metadata. resolving in page (rather than from main proc) is what
-// makes discover/feed/homepage players work: api is same origin here.
-//
-// res order:
-//   1. window.TralbumData            release/track pages (no fetch)
-//   2. #PlaylistPage data-blob       fan playlist page (full tracks + streams)
-//   3. #pagedata tracklists          collection / wishlist (full album no fetch)
-//   4. #pagedata track_list          feed (whole feed is queue)
-//   5. active carousel player        homepage playlist / radio single track
-//   6. CACHE.discover (capture)      discover / genre pages no extra fetch
-//   7. tralbum API by track id       below fold items dom album hint
-//   8. #collection-player / DOM      last resort single track
-//
-// it resolves to streampayload ({ queue, activeIndex, context, format }).
+// js injected when a stream is trapped: runs in page context
 export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'): string {
     const safeUrl = JSON.stringify(trappedUrl);
     const safeFormat = JSON.stringify(format);
@@ -30,12 +13,10 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
         if (!window.__bcrpc.discover) window.__bcrpc.discover = {};
         var CACHE = window.__bcrpc;
 
-        // stop page own (muted) player instant we take over so it can't
-        // keep auto advancing thru release & re trapping every track.
         try { document.querySelectorAll('audio').forEach(function (a) { try { a.pause(); } catch (e) {} }); } catch (e) {}
 
         function toId(v) { if (v == null) return ''; var m = String(v).match(/\\d+/); return m ? m[0] : ''; }
-        // strip a leading track number from a title ("01 ", "1. ", "12 - ", "03) ")
+        // strip a leading track number from a title
         function stripNo(t) {
             var s = String(t == null ? '' : t);
             var r = s.replace(/^\\s*\\d{1,3}\\s*[-.\\)]\\s+/, '').replace(/^\\s*0\\d{1,2}\\s+/, '').trim();
@@ -97,9 +78,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return out;
         }
 
-        // same origin tralbum fetch (cookied) cached. bandcamp answers retired
-        // endpoints with 200 + {error:true} (tralbum/2/info -> "bad function");
-        // treat those as misses so fallbacks (mobile endpoint) actually run.
+        // cached same-origin tralbum fetch
         async function apiFetch(url) {
             try {
                 var r = await fetch(url, { credentials: 'include' }); if (!r.ok) return null;
@@ -114,9 +93,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             var c = CACHE.tralbum[ck];
             if (c && Date.now() - c.at < TTL) return c.data;
             var base = (bandId ? 'band_id=' + bandId + '&' : '') + 'tralbum_type=' + type + '&tralbum_id=' + id;
-            // web endpoint is one site itself calls so it is most
-            // reliable from this (desktop browser) context; mobile endpoint is
-            // fallback that also carries album_id for track lookups.
             var urls = [
                 'https://bandcamp.com/api/tralbum/2/info?' + base,
                 'https://bandcamp.com/api/mobile/24/tralbum_details?' + base
@@ -124,12 +100,12 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             for (var i = 0; i < urls.length; i++) {
                 var d = await apiFetch(urls[i]);
                 if (d && (d.trackinfo || d.tracks)) { CACHE.tralbum[ck] = { data: d, at: Date.now() }; return d; }
-                if (d && !CACHE.tralbum[ck]) CACHE.tralbum[ck] = { data: d, at: Date.now() }; // keep album id bearing track payloads
+                if (d && !CACHE.tralbum[ck]) CACHE.tralbum[ck] = { data: d, at: Date.now() };
             }
             return CACHE.tralbum[ck] ? CACHE.tralbum[ck].data : null;
         }
 
-        // resolve full album queue for track id given opt hints.
+        // resolve full album queue for track id given opt hints
         async function resolveByTrack(tid, bandHint, albumHint) {
             var albumId = toId(albumHint), bandId = toId(bandHint), trackOnly = [];
             if (!albumId) {
@@ -153,12 +129,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return trackOnly;
         }
 
-        // resolve just trapped track (no album expansion). used for
-        // homepage carousel players (playlist / radio / aggregated) where
-        // surrounding queue is curation not track album. track
-        // endpoint sometimes returns thin row (title only) so when art or
-        // artist is missing we backfill from parent album that is
-        // "only song name shows" fix for homepage playlist players.
+        // resolve just the trapped track (no album expansion) for homepage carousel players
         async function resolveSingle(tid) {
             var tr = await fetchTralbum('t', tid, '');
             var q = normaliseApi(tr);
@@ -185,16 +156,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return [pick];
         }
 
-        // discover / genre pages
-        // discover app ("/discover/...") fetches grid from
-        // /api/discover/1/discover_web; capture hook installed on page (see
-        // main.ts) mirrors every result into cache.discover keyed by featured
-        // track id. each entry carries release identity (band + tralbum id)
-        // plus featured track own stream url & metadata. that lets us
-        // resolve full album w/ single cached req & if that is
-        // unavailable still play featured track w/ correct metadata & no
-        // extra req replacing track -> album discovery fetch that was
-        // main source of http 429 storm on genre pages.
+        // discover/genre pages: resolve from the captured discover api
         async function fromDiscoverCapture(tid) {
             if (!tid) return null;
             var d = CACHE.discover && CACHE.discover[tid];
@@ -224,9 +186,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             };
         }
 
-        // vue homepage tags each player widget w/ tracklistkey
-        // ("playlist:123", "radio:9", "aggregated:album:..."); actively
-        // playing one shows pause control. identify *player* not page.
+        // the homepage tags each player widget with tracklistkey
         function activePlayerKey() {
             var e = document.querySelector('[tracklistkey][aria-label="Pause"], [aria-label="Pause"][tracklistkey]');
             return e ? (e.getAttribute('tracklistkey') || '') : '';
@@ -236,9 +196,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
         function fromTralbumData() {
             var td = window.TralbumData;
             if (!td || !td.trackinfo) {
-                // newer ("trackpipe") release pages no longer expose
-                // window.tralbumdata; same payload lives in data tralbum
-                // attr instead.
                 var el = document.querySelector('[data-tralbum]');
                 if (el) { try { td = JSON.parse(el.getAttribute('data-tralbum')); } catch (e) { td = null; } }
             }
@@ -246,7 +203,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             var q = normaliseApi(td);
             if (!q.length) return null;
             var tid = trappedTrackId();
-            if (tid && !q.some(function (t) { return t.id === tid; })) return null; // stale tralbumdata
+            if (tid && !q.some(function (t) { return t.id === tid; })) return null;
             var active = 0;
             if (tid) { var i = q.findIndex(function (t) { return t.id === tid; }); if (i !== -1) active = i; }
             return { queue: q, activeIndex: active, context: 'release', format: format };
@@ -259,12 +216,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
         }
 
         // 2. collection / wishlist tracklists
-        // owned sections (collection / hidden / gifts) embed the WHOLE album inline
-        // so we play it with zero api calls. wishlist items aren't owned, so bandcamp
-        // only embeds the item's featured (preview) track inline that's why wishlist
-        // albums used to play just one song. for those we resolve the real release
-        // from the tralbum api (same path below-fold items already take) so the whole
-        // album queues & track items get real metadata.
         async function fromCollectionData(tid) {
             if (!tid) return null;
             var blob = readBlob('pagedata');
@@ -283,12 +234,10 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
                     var type = (item.tralbum_type === 't' || item.item_type === 'track' || key.charAt(0) === 't') ? 't' : 'a';
                     var isWish = sections[s] === 'wishlist';
 
-                    // not owned (or only a featured track embedded): pull the full release
                     if (isWish || arr.length <= 1) {
                         var full = await resolveByTrack(tid, bandId, type === 'a' ? tralbumId : '');
                         if (full.length) {
                             var fi = full.findIndex(function (t) { return t.id === tid; });
-                            // albums play from the start; a wishlisted single track plays itself
                             var act = type === 'a' ? 0 : (fi === -1 ? 0 : fi);
                             return { queue: full, activeIndex: act, context: isWish ? 'wishlist' : 'collection', format: format };
                         }
@@ -313,8 +262,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
                             tralbumType: type
                         };
                     });
-                    // owned album: play from track 1 (the trapped track is the item's
-                    // featured track, often not track 1); a track item plays itself
                     var active = type === 'a' ? 0 : (function () { var i = queue.findIndex(function (t) { return t.id === tid; }); return i === -1 ? 0 : i; })();
                     if (queue[active] && !queue[active].src) queue[active].src = targetUrl;
                     return { queue: queue, activeIndex: active, context: isWish ? 'wishlist' : 'collection', format: format };
@@ -323,13 +270,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return null;
         }
 
-        // 2b. playlist page (full tracks embedded inline)
-        // fan playlist page (#playlistpage data blob) ships whole
-        // tracklist in appdata.tracks each row carrying its own direct
-        // streamurl plus title / artist / album / art / duration. that means
-        // entire playlist is playable w/ zero api calls & crucially
-        // real stream urls are right here so audio plays immediately instead of
-        // failing way single track api fallback did.
+        // 2b. playlist page
         function fromPlaylistPage(tid) {
             var blob = readBlob('PlaylistPage');
             var data = blob && (blob.appData || blob);
@@ -360,9 +301,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             var active = 0;
             if (tid) {
                 var idx = queue.findIndex(function (t) { return t.id === tid; });
-                // the blob only embeds the FIRST ~30 tracks of a long playlist; a
-                // clicked track beyond that isn't in it. bailing to the api resolvers
-                // plays the RIGHT track instead of silently starting from track 1.
                 if (idx === -1) return null;
                 active = idx;
             }
@@ -370,10 +308,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return { queue: queue, activeIndex: active, context: 'playlist', format: format };
         }
 
-        // 3. feed: track_list is play queue
-        // fan feed embeds every featured track (w/ stream url artist
-        // album art) in #pagedata.track_list & plays thru them in order so
-        // we queue whole feed & start at trapped track. zero reqs.
+        // 3. feed track_list
         function fromFeed(tid) {
             var blob = readBlob('pagedata');
             var list = blob && blob.track_list;
@@ -406,13 +341,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return { queue: queue, activeIndex: active, context: 'feed', format: format };
         }
 
-        // homepage / embedded player tracklists
-        // homepage renders featured playlist *entire* tracklist inline as
-        //   <div class="track-meta" id=<trackId> streamurl=… bandid=… duration=…>
-        // rows (title / artist / album / art in child nodes) grouped inside
-        // <ol class="track-list">. reading those gives full playlist queue w/
-        // real metadata & direct stream urls no api no 429 which is what
-        // homepage playlist players were missing (they only got thin single track).
+        // homepage playlists render their entire tracklist inline as .track-meta rows (stream urls + metadata)
         function metaToTrack(el) {
             function txt(sel) { var e = el.querySelector(sel); return e ? (e.textContent || '').replace(/\\s+/g, ' ').trim() : ''; }
             var img = el.querySelector('.art img, img');
@@ -436,8 +365,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             if (!tid) return null;
             var target = document.querySelector('.track-meta[streamurl][id="' + tid + '"]');
             if (!target) return null;
-            // whole tracklist (one <ol class="track-list">) is queue; fall
-            // back to just this row when it isn't inside one (single card widgets).
             var scope = target.closest ? target.closest('.track-list') : null;
             var rows = scope ? scope.querySelectorAll('.track-meta[streamurl]') : [target];
             if (!rows.length) rows = [target];
@@ -454,12 +381,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return { queue: queue, activeIndex: active, context: 'playlist', format: format };
         }
 
-        // dom album hint (feed stories / collection grid items)
-        // every story/grid <li> carries release identity (data tralbumid /
-        // data bandid or richer data item json). trapped track on
-        // initial click is item featured track so we can map it to its
-        // album w/out discovery req covers below "view all" collection
-        // items & feed stories loaded after embedded track_list.
+        // dom album hint from story/grid <li> release identity
         function domHint(tid) {
             if (!tid) return null;
             var el = document.querySelector('[data-trackid="' + tid + '"]');
@@ -490,14 +412,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return { albumId: albumId, bandId: bandId, type: type, url: url, artist: artist, album: album, art: art, trackTitle: trackTitle };
         }
 
-        // collection mini player album hint
-        // on collection/wishlist page each row data trackid is item
-        // featured track not one that starts playing (track 1) so domhint
-        // misses for below fold items & we'd fall back to scraping
-        // now playing display which shows featured track. mini player
-        // though exposes album currently loaded via data collect item
-        // ("a<albumId>"). resolve that album & seek to trapped track so
-        // player shows/plays right song instead of featured one.
+        // collection mini-player hint: it exposes the loaded album via data-collect-item
         function collectionPlayerHint() {
             var el = document.querySelector('#collection-player [data-collect-item]');
             if (!el) el = document.querySelector('.collection-item-container.active, .collection-item-container.track_play_hilite');
@@ -510,12 +425,7 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             return null;
         }
 
-        // single TRACK item in the collection/wishlist grid. bandcamp removed the
-        // data-playerdata attribute these items used to carry, which left this path
-        // returning title-only tracks (no art / artist). resolve the track through
-        // the tralbum api instead: its parent album carries correct per-row artists
-        // (a compilation track shows ITS artist, not the page band) plus art. the
-        // trapped stream keeps playback instant; dom attributes are the last resort.
+        // single TRACK item in the grid: resolve through the tralbum api (parent album carries the right artist + art)
         async function fromCollectionItem(tid) {
             if (!tid) return null;
             var li = document.querySelector('.collection-item-container[data-trackid="' + tid + '"]');
@@ -529,7 +439,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
                 return { queue: q, activeIndex: idx === -1 ? 0 : idx, context: 'collection', format: format };
             }
 
-            // api unavailable: play the trapped stream with whatever the row shows
             var img = li.querySelector('img.collection-item-art, img');
             var art = img ? (img.getAttribute('src') || '').replace(/_\\d+\\.jpg([?#].*)?$/, '_10.jpg') : '';
             var artistEl = li.querySelector('.collection-item-artist');
@@ -584,13 +493,11 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             };
         }
 
-        // orchestration
         var tid = trappedTrackId();
 
         var release = fromTralbumData();
         if (release) return release;
 
-        // fan playlist page full tracklist + stream urls embedded inline.
         var playlist = fromPlaylistPage(tid);
         if (playlist) return playlist;
 
@@ -600,57 +507,33 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
         var feed = fromFeed(tid);
         if (feed) return feed;
 
-        // homepage featured playlist: full tracklist is embedded in dom.
         var trackMeta = fromTrackMeta(tid);
         if (trackMeta) return trackMeta;
 
-        // homepage carousel players (playlist / radio / curated): play exactly
-        // trapped track w/ correct metadata expanding it to track album
-        // would be wrong here since surrounding queue is curation. this is
-        // checked before discover capture so curated carousel that happens to
-        // share track id w/ loaded discover grid isn't expanded to its album.
         if (tid && activePlayerKey()) {
             var single = await resolveSingle(tid);
             if (single.length) return { queue: single, activeIndex: 0, context: 'single', format: format };
         }
 
-        // discover / genre pages: resolve from captured discover_web grid.
         var discover = await fromDiscoverCapture(tid);
         if (discover) return discover;
 
-        // single track item in the collection/wishlist grid: resolve via its parent
-        // album (correct artist/art) & play w/ the trapped stream.
         var ciTrack = await fromCollectionItem(tid);
         if (ciTrack) return ciTrack;
 
-        // discover / below fold collection / scrolled feed: resolve full
-        // album thru api by trapped track id using dom album hint
-        // where present to skip track -> album discovery req. on
-        // collection page mini player names album directly which is more
-        // reliable than per row featured track hint.
         var hint = domHint(tid);
         var cHint = (hint && hint.albumId) ? null : collectionPlayerHint();
         if (tid) {
             var bandHint = (hint && hint.bandId) || (cHint && cHint.bandId);
-            // an album id hint only. a track item's data-tralbumid is the TRACK id
-            // (and the collection mini-player reports "t<id>" the same way); feeding
-            // that to resolveByTrack as an album fetched the wrong thing & left tracks
-            // w/ no metadata. for track-typed hints leave albHint empty so it does the
-            // track -> album lookup.
             var albHint = ((hint && hint.type === 'a') ? hint.albumId : '') || ((cHint && cHint.type === 'a') ? cHint.albumId : '');
             var q = await resolveByTrack(tid, bandHint, albHint);
             if (q.length) {
                 var idx = q.findIndex(function (t) { return t.id === tid; });
                 var itemType = (hint && hint.type) || (cHint && cHint.type) || 'a';
                 var isColl = !!cHint;
-                // an album item in your collection traps its FEATURED track (often not
-                // track 1), but clicking it should play the album from the start. a
-                // single track item plays that track. release pages honor the click.
                 var active = itemType === 't' ? (idx === -1 ? 0 : idx) : (isColl ? 0 : (idx === -1 ? 0 : idx));
                 return { queue: q, activeIndex: active, context: isColl ? 'collection' : 'release', format: format };
             }
-            // album lookup failed but dom told us release: play trapped
-            // track alone still w/ correct metadata.
             if (hint) {
                 return {
                     queue: [{
@@ -671,9 +554,6 @@ export function buildExtractorScript(trappedUrl: string, format: 'raw' | 'hls'):
             }
         }
 
-        // last resort before the metadata-less dom scrape: ask the track api
-        // directly. this is what populates title/artist/art for a wishlisted single
-        // track whose album expansion above came back empty.
         if (tid) {
             var single = await resolveSingle(tid);
             if (single.length) return { queue: single, activeIndex: 0, context: 'single', format: format };

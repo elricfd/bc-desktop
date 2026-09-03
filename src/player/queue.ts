@@ -1,7 +1,6 @@
 import type { PlayerTrack, RepeatMode, QueueContext } from '../shared/types';
 
-// a playback queue w repeat + shuffle. tracks is the natural order; order is
-// play order (an index permutation) so shuffle never mutates the displayed list
+// a playback queue w repeat + shuffle
 export class Queue {
     tracks: PlayerTrack[] = [];
     context: QueueContext = 'single';
@@ -17,8 +16,7 @@ export class Queue {
         this.rebuildOrder(Math.max(0, Math.min(activeIndex, tracks.length - 1)));
     }
 
-    // append tracks to the end of the queue without disturbing what's playing.
-    // returns true if the queue was empty before (caller should start playback).
+    // append tracks to the end of the queue without disturbing what's playing
     append(newTracks: PlayerTrack[]): boolean {
         const wasEmpty = this.tracks.length === 0;
         const start = this.tracks.length;
@@ -42,7 +40,6 @@ export class Queue {
             this.pos = currentTrackIndex;
             return;
         }
-        // keep current track first, shuffle rest
         const rest = natural.filter((i) => i !== currentTrackIndex);
         for (let i = rest.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));

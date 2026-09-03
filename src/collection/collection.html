@@ -39,27 +39,20 @@
             border-radius: 6px; padding: 7px 10px; font-size: 12px; cursor: pointer;
         }
         .tbtn:hover { border-color: var(--accent); }
-        /* icon-only toolbar buttons (dir arrow, view mode, more) */
         .tbtn.dirbtn, .tbtn.iconbtn { display: inline-flex; align-items: center; justify-content: center; padding: 6px 8px; }
         .tbtn.dirbtn svg, .tbtn.iconbtn svg { width: 15px; height: 15px; display: block; transition: transform .12s ease; }
         .tbtn.dirbtn.asc svg { transform: scaleY(-1); }
-        /* svg icons inside the round overlay buttons + badges */
         .enq, .dl, .tlq, .pl-x { display: inline-flex; align-items: center; justify-content: center; }
         .enq svg, .dl svg { width: 15px; height: 15px; }
         .tlq svg, .pl-x svg { width: 12px; height: 12px; }
         .wishb svg { width: 13px; height: 13px; display: block; }
         .pl-new .big svg { width: 26px; height: 26px; display: block; }
-        /* same arrow, smaller, as the list view's column sort indicator */
         .lv-head svg { width: 10px; height: 10px; vertical-align: -1px; margin-left: 3px; }
         .lv-head svg.asc { transform: scaleY(-1); }
         .grid {
-            /* positioned so children's offsetTop is grid-relative (the list
-               view's virtual scroller does exact offset math against it) */
             position: relative;
             flex: 1; overflow-y: auto; padding: 16px;
             display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; align-content: start;
-            /* the page-wide rules hide every scrollbar; the collection is the one
-               surface long enough to need a visible one, so restore a slim one here */
             scrollbar-width: thin; scrollbar-color: #3a3f42 transparent;
         }
         .card { cursor: pointer; }
@@ -87,7 +80,6 @@
             font-size: 18px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .12s ease;
         }
         .card:hover .enq { opacity: 1; }
-        /* wishlist marker (top-left of the cover) */
         .wishb {
             position: absolute; left: 6px; top: 6px; font-size: 12px; line-height: 1;
             background: rgba(24,26,27,.85); color: #e46; border-radius: 4px; padding: 4px 6px;
@@ -107,11 +99,10 @@
         }
         .dlfmt:hover { background: rgba(255,255,255,.06); }
 
-        /* CRITICAL: Tracklist Layout Fixes */
         .tlinline {
             grid-column: 1 / -1; display: flex; gap: 24px; align-items: flex-start;
             background: #1b1e1f; border: 1px solid var(--line); border-radius: 10px;
-            padding: 20px; margin: 4px 0; height: max-content; /* Force full height calculation */
+            padding: 20px; margin: 4px 0; height: max-content;
             animation: tlslide .18s ease;
         }
         @keyframes tlslide { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
@@ -126,11 +117,9 @@
             border-radius: 999px; padding: 3px 9px; cursor: pointer;
         }
         .tltag:hover { border-color: var(--accent); color: var(--text); }
-        /* album / artist text in the panel links to its group in the list view */
         .tltitle, .tlartist { cursor: pointer; }
         .tltitle:hover, .tlartist:hover { text-decoration: underline; }
 
-        /* modal notice (large collection advice) */
         .modalback {
             position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55);
             display: flex; align-items: center; justify-content: center;
@@ -150,11 +139,9 @@
         .modal button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
         .modal button:hover { filter: brightness(1.12); }
 
-        /* clickable tags in the list view genre column */
         .lv-tag { cursor: pointer; }
         .lv-tag:hover { color: var(--accent); text-decoration: underline; }
 
-        /* optional group headers in the grid view (settings toggle) */
         .gridsep {
             grid-column: 1 / -1; font-size: 12px; color: var(--sub); font-weight: 600;
             padding: 8px 0 0; border-bottom: 1px solid var(--line); margin-bottom: -6px;
@@ -168,7 +155,6 @@
         .tlbtns .tlplayall { background: var(--accent); border-color: var(--accent); color: #fff; flex: 100%; }
         .tlbtns button:hover { filter: brightness(1.12); }
         
-        /* Replaced column-width with a CSS Grid for robust wrapping */
         .tlright { 
             flex: 1; 
             display: grid; 
@@ -185,7 +171,6 @@
         .tlnum { width: 20px; text-align: right; color: var(--sub); font-size: 12px; flex-shrink: 0; }
         .tltrk { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tldur { color: var(--sub); font-size: 12px; flex-shrink: 0; }
-        /* track list view (all tracks of every release, foobar-style) */
         .grid.listmode { display: block; padding: 0 0 16px; }
         .lv-head, .lv-row {
             display: grid; grid-template-columns: 44px 1fr 1.5fr 1.4fr 52px 1fr 56px;
@@ -200,7 +185,6 @@
         .lv-head span { cursor: pointer; user-select: none; }
         .lv-head span:hover { color: var(--text); }
         .lv-head span.on { color: var(--accent); }
-        /* fixed height: the virtual scroller computes row offsets from constants */
         .lv-genrehead {
             height: 38px; padding: 0 18px 5px; display: flex; align-items: flex-end;
             font-size: 12px; font-weight: 600; color: var(--accent);
@@ -215,7 +199,6 @@
         .lv-gen { color: var(--sub); font-size: 12px; }
         .lv-dur { text-align: right; color: var(--sub); font-size: 12px; }
 
-        /* playlists panel: swaps in for the grid (which keeps rendering hidden) */
         .plov {
             flex: 1; overflow-y: auto; padding: 16px 18px;
             scrollbar-width: thin; scrollbar-color: #3a3f42 transparent;
@@ -230,7 +213,6 @@
         }
         .pl-card:hover .pl-cover { transform: scale(1.02); outline: 2px solid var(--accent); }
         .pl-cover img { width: 100%; height: 100%; object-fit: cover; }
-        /* fewer than 4 covers: the first one fills the whole tile */
         .pl-cover img:only-child, .pl-cover .pl-empty { grid-column: 1 / -1; grid-row: 1 / -1; }
         .pl-cover .pl-empty { display: flex; align-items: center; justify-content: center; font-size: 34px; color: var(--sub); }
         .pl-cover.sm { width: 96px; flex-shrink: 0; }
@@ -243,7 +225,6 @@
         }
         .pl-new:hover { border-color: var(--accent); color: var(--text); }
         .pl-new .big { font-size: 28px; line-height: 1; }
-        /* playlist detail */
         .pl-head { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
         .pl-title { font-size: 17px; font-weight: 600; cursor: pointer; }
         .pl-title:hover { text-decoration: underline; }
@@ -268,9 +249,7 @@
         .pl-x:hover { background: #d66; color: #fff; }
         .pl-row.dragover { box-shadow: inset 0 2px 0 var(--accent); }
         .pl-row.dragging { opacity: .4; }
-        /* "add to playlist" picker header (menu itself reuses .dlmenu) */
         .plm-title { padding: 4px 9px 6px; font-size: 11px; color: var(--sub); }
-        /* transient feedback toast (imports, reloads) */
         .ctoast {
             position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(8px);
             z-index: 120; background: #202325; border: 1px solid var(--line); border-radius: 8px;
@@ -280,23 +259,19 @@
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .ctoast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
-        /* custom playlist cover (detail header + browser cards reuse .pl-cover) */
         .pl-cover.clickable { cursor: pointer; }
         .pl-cover.clickable:hover { outline: 2px solid var(--accent); }
-        /* playlist description under the title (click to edit) */
         .pl-desc {
             font-size: 12px; color: var(--muted); margin-top: 6px; max-width: 620px;
             white-space: pre-wrap; cursor: pointer; line-height: 1.5;
         }
         .pl-desc:hover { color: var(--text); }
         .pl-desc.empty { font-style: italic; color: var(--sub); }
-        /* local-files marker on grid cards (mirrors the wishlist heart) */
         .localb {
             position: absolute; left: 6px; top: 6px; font-size: 10px; line-height: 1;
             background: rgba(24,26,27,.85); color: #8ac6ff; border-radius: 4px; padding: 4px 6px;
             pointer-events: none; letter-spacing: .04em;
         }
-        /* multiline text in the name/description modal */
         .modal textarea {
             width: 100%; min-height: 96px; resize: vertical;
             background: #121415; border: 1px solid var(--line); border-radius: 6px;
@@ -304,7 +279,6 @@
         }
         .modal textarea:focus { border-color: var(--accent); }
 
-        /* per-song add-to-queue, revealed on row hover */
         .tlq {
             width: 22px; height: 22px; flex-shrink: 0; border: none; border-radius: 50%;
             background: rgba(255,255,255,.08); color: var(--text); font-size: 14px; line-height: 1;

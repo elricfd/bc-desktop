@@ -23,8 +23,6 @@
             border-radius: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer; font-family: inherit;
         }
         .bar button:hover { border-color: #1da0c3; }
-        /* no scrollbar until the list actually outgrows the popup (>4 items);
-           render() toggles .scrolly */
         .list { flex: 1; overflow-y: auto; padding: 6px; scrollbar-width: none; }
         .list.scrolly { scrollbar-width: thin; scrollbar-color: #3a3f42 transparent; }
         .row { padding: 8px 10px; border-radius: 6px; cursor: default; }
@@ -35,12 +33,10 @@
         .st { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: #848079; flex-shrink: 0; }
         .st.completed { color: #5fb878; }
         .st.progressing { color: #1da0c3; }
-        /* waiting on bandcamp to encode the file - not stalled, just slow */
         .st.preparing { color: #d8a33c; }
         .st.interrupted, .st.cancelled { color: #d66; }
         .track { flex: 1; height: 4px; background: #2a2e30; border-radius: 2px; overflow: hidden; }
         .track > div { height: 100%; background: #1da0c3; border-radius: 2px; transition: width 0.2s ease; }
-        /* indeterminate sweep while bandcamp prepares the file */
         .track.prep > div { width: 40%; background: #d8a33c; animation: prepsweep 1.1s ease-in-out infinite; }
         @keyframes prepsweep { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
         .state { padding: 30px 12px; color: #848079; font-size: 12px; text-align: center; }
@@ -129,8 +125,7 @@
             }
         }
 
-        // size the window to the actual content (no scrollbar / dead space);
-        // past 4 rows the height caps there and the list scrolls
+        // size the window to the actual content (no scrollbar / dead space)
         function requestResize() {
             requestAnimationFrame(() => {
                 const bar = document.querySelector('.bar');
@@ -139,12 +134,12 @@
                 let listH;
                 if (rows.length > 4) {
                     const r4 = rows[3];
-                    listH = (r4.offsetTop - list.offsetTop) + r4.offsetHeight + 6; // + bottom padding
+                    listH = (r4.offsetTop - list.offsetTop) + r4.offsetHeight + 6;
                 } else {
                     listH = list.scrollHeight;
                 }
                 const footH = footer && footer.style.display !== 'none' ? footer.offsetHeight : 0;
-                ipcRenderer.send('downloads:resize', Math.ceil(bar.offsetHeight + listH + footH + 2)); // +2 body border
+                ipcRenderer.send('downloads:resize', Math.ceil(bar.offsetHeight + listH + footH + 2));
             });
         }
 

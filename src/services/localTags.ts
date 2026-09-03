@@ -1,11 +1,3 @@
-// minimal local audio metadata reader for the local-files library.
-// modeled on quodlibet/mutagen's approach: every format is normalized into ONE
-// flat schema (title/artist/album/albumartist/year/tracknum/genre/duration/art)
-// with graceful degradation - a broken or missing tag never throws, it just
-// yields fewer fields, and the importer falls back to the filename (quodlibet
-// does exactly this for WAV, whose metadata story is hopeless).
-// read-only by design: we never rewrite the user's files, so there is zero
-// corruption risk.
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -17,20 +9,13 @@ export interface LocalTags {
     year: number;
     trackNum: number;
     genre: string[];
-    /** seconds; 0 when the container doesn't say (player learns it on play) */
     duration: number;
-    /** embedded front cover when present */
     art: Buffer | null;
 }
 
 const empty = (): LocalTags => ({ title: '', artist: '', album: '', albumArtist: '', year: 0, trackNum: 0, genre: [], duration: 0, art: null });
 
-// ---------------------------------------------------------------------------
-// id3v2 (mp3, and embedded in wav/aiff chunks). "ID3 is absolutely the worst
-// thing ever" - quodlibet/formats/_id3.py. we read the handful of frames that
-// map onto our schema (their IDS table): TIT2 TPE1 TALB TPE2 TRCK TCON APIC,
-// plus TDRC (v2.4) / TYER (v2.3) for the year and the 3-char v2.2 variants.
-// ---------------------------------------------------------------------------
+// id3v2 (mp3, and embedded in wav/aiff chunks)
 
 const V22_IDS: Record<string, string> = { TT2: 'TIT2', TP1: 'TPE1', TAL: 'TALB', TP2: 'TPE2', TRK: 'TRCK', TYE: 'TYER', TCO: 'TCON', PIC: 'APIC' };
 
@@ -51,12 +36,12 @@ function deUnsync(b: Buffer): Buffer {
 
 function decodeText(enc: number, b: Buffer): string {
     try {
-        if (enc === 1) { // utf-16 with BOM (LE assumed when absent)
+        if (enc === 1) {
             if (b.length >= 2 && b[0] === 0xfe && b[1] === 0xff) return swap16(b.subarray(2)).toString('utf16le');
             if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) return b.subarray(2).toString('utf16le');
             return b.toString('utf16le');
         }
-        if (enc === 2) return swap16(b).toString('utf16le'); // utf-16be, no BOM
+        if (enc === 2) return swap16(b).toString('utf16le');
         if (enc === 3) return b.toString('utf8');
         return b.toString('latin1');
     } catch { return ''; }
@@ -67,7 +52,7 @@ function swap16(b: Buffer): Buffer {
     return out;
 }
 
-// multi-value text frames are null-separated; mutagen keeps a list, we join
+// multi-value text frames are null-separated
 const splitVals = (s: string): string[] => s.split('\0').map((x) => x.trim()).filter(Boolean);
 const textOf = (enc: number, b: Buffer): string => splitVals(decodeText(enc, b)).join(', ');
 
@@ -89,14 +74,13 @@ export function parseId3v2(buf: Buffer): Id3Result | null {
     if (major < 2 || major > 4) return null;
     const flags = buf[5];
     const size = synchsafe(buf, 6);
-    const tagSize = 10 + size + ((flags & 0x10) ? 10 : 0); // + footer (v2.4)
+    const tagSize = 10 + size + ((flags & 0x10) ? 10 : 0);
     let body = buf.subarray(10, Math.min(10 + size, buf.length));
-    if ((flags & 0x80) && major < 4) body = deUnsync(body); // whole-tag unsync (v2.4 is per-frame)
+    if ((flags & 0x80) && major < 4) body = deUnsync(body);
 
     const t = empty();
     let pictures: { type: number; data: Buffer }[] = [];
     let pos = 0;
-    // extended header: v2.3 size excludes its own 4 bytes, v2.4 includes them
     if (flags & 0x40) {
         if (major === 4) pos += Math.max(6, synchsafe(body, 0));
         else pos += 4 + body.readUInt32BE(0);
@@ -106,15 +90,13 @@ export function parseId3v2(buf: Buffer): Id3Result | null {
     const text: Record<string, string> = {};
     while (pos + headLen <= body.length) {
         const rawId = body.toString('latin1', pos, pos + idLen);
-        if (!/^[A-Z0-9]+$/.test(rawId)) break; // padding / garbage
+        if (!/^[A-Z0-9]+$/.test(rawId)) break;
         let fsize: number;
         let fflags = 0;
         if (major === 2) fsize = (body[pos + 3] << 16) | (body[pos + 4] << 8) | body[pos + 5];
         else if (major === 3) { fsize = body.readUInt32BE(pos + 4); fflags = body.readUInt16BE(pos + 8); }
         else {
             fsize = synchsafe(body, pos + 4);
-            // some v2.4 writers (itunes) use plain sizes; a plain size that fits
-            // where the synchsafe one doesn't wins (mutagen has the same heuristic)
             const plain = body.readUInt32BE(pos + 4);
             if (plain !== fsize && pos + 10 + fsize < body.length) {
                 const nextOk = (o: number) => o + 10 > body.length || /^[A-Z0-9]{4}/.test(body.toString('latin1', o, o + 4)) || body[o] === 0;
@@ -127,16 +109,16 @@ export function parseId3v2(buf: Buffer): Id3Result | null {
         pos += headLen + fsize;
         const id = major === 2 ? (V22_IDS[rawId] || rawId) : rawId;
         if (major === 4) {
-            if (fflags & 0x02) data = deUnsync(data); // per-frame unsync
-            if (fflags & 0x01) data = data.subarray(4); // data length indicator
+            if (fflags & 0x02) data = deUnsync(data);
+            if (fflags & 0x01) data = data.subarray(4);
         }
-        if (fflags & 0x0c && major === 3) continue; // v2.3 compressed/encrypted
+        if (fflags & 0x0c && major === 3) continue;
         if (id === 'APIC' && data.length > 4) {
             try {
                 const enc = data[0];
                 let p: number;
                 let picType: number;
-                if (rawId === 'PIC') { // v2.2: 3-char image format, not a mime string
+                if (rawId === 'PIC') {
                     picType = data[4];
                     p = zEnd(data, 5, enc);
                 } else {
@@ -157,12 +139,11 @@ export function parseId3v2(buf: Buffer): Id3Result | null {
     t.title = text.TIT2 || '';
     t.artist = text.TPE1 || '';
     t.album = text.TALB || '';
-    t.albumArtist = text.TPE2 || ''; // quodlibet maps TPE2->performer; in the wild it's album artist
+    t.albumArtist = text.TPE2 || '';
     const date = text.TDRC || text.TYER || text.TORY || '';
     const ym = date.match(/\d{4}/);
     t.year = ym ? Number(ym[0]) : 0;
     t.trackNum = parseInt(text.TRCK || '', 10) || 0;
-    // TCON: strip legacy "(nn)" genre references, keep the text
     t.genre = splitVals((text.TCON || '').replace(/\(\d+\)/g, '\0')).filter((g) => !/^\d+$/.test(g));
     // front cover (type 3) preferred, else the first picture
     const front = pictures.find((p) => p.type === 3) || pictures[0];
@@ -180,13 +161,10 @@ function parseId3v1(fd: number, fileSize: number, t: LocalTags): void {
     t.artist = t.artist || str(33, 63);
     t.album = t.album || str(63, 93);
     t.year = t.year || Number(str(93, 97).match(/\d{4}/)?.[0] || 0);
-    if (!t.trackNum && b[125] === 0 && b[126] > 0) t.trackNum = b[126]; // id3v1.1
+    if (!t.trackNum && b[125] === 0 && b[126] > 0) t.trackNum = b[126];
 }
 
-// ---------------------------------------------------------------------------
-// mp3 duration: Xing/Info/VBRI header when present (VBR), else a CBR estimate
-// from the first frame's bitrate - the same ladder mutagen's MPEGInfo climbs.
-// ---------------------------------------------------------------------------
+// mp3 duration: Xing/Info/VBRI header when present (VBR), else a CBR estimate from the first frame's bitrate
 
 const BITRATES_V1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
 const BITRATES_V2L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
@@ -199,8 +177,8 @@ function mp3Duration(fd: number, fileSize: number, offset: number): number {
     fs.readSync(fd, b, 0, len, offset);
     for (let i = 0; i + 4 < b.length; i++) {
         if (b[i] !== 0xff || (b[i + 1] & 0xe0) !== 0xe0) continue;
-        const ver = (b[i + 1] >> 3) & 3; // 3=mpeg1, 2=mpeg2, 0=mpeg2.5
-        const layer = (b[i + 1] >> 1) & 3; // 1 = layer III
+        const ver = (b[i + 1] >> 3) & 3;
+        const layer = (b[i + 1] >> 1) & 3;
         const brIdx = b[i + 2] >> 4;
         const srIdx = (b[i + 2] >> 2) & 3;
         if (ver === 1 || layer !== 1 || brIdx === 0 || brIdx === 15 || srIdx === 3) continue;
@@ -219,15 +197,12 @@ function mp3Duration(fd: number, fileSize: number, offset: number): number {
         if (b.toString('latin1', i + 4 + 32, i + 4 + 36) === 'VBRI') {
             return Math.round((b.readUInt32BE(i + 4 + 32 + 14) * spf) / rate);
         }
-        return Math.round(((fileSize - offset - i) * 8) / (kbps * 1000)); // CBR estimate
+        return Math.round(((fileSize - offset - i) * 8) / (kbps * 1000));
     }
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// flac: STREAMINFO gives an exact duration, VORBIS_COMMENT the tags, PICTURE
-// the cover. vorbis comments double for ogg/opus below (quodlibet/xiph.py).
-// ---------------------------------------------------------------------------
+// flac: STREAMINFO duration, VORBIS_COMMENT tags, PICTURE cover (vorbis comments double for ogg/opus below)
 
 function applyVorbisComment(c: Record<string, string[]>, t: LocalTags): void {
     const first = (k: string) => (c[k] && c[k][0]) || '';
@@ -240,7 +215,7 @@ function applyVorbisComment(c: Record<string, string[]>, t: LocalTags): void {
     if (!t.genre.length && c.genre) t.genre = c.genre.filter(Boolean);
 }
 
-// KEY=value pairs, length-prefixed; shared by flac blocks and ogg comment packets
+// KEY=value pairs, length-prefixed
 function parseVorbisComments(b: Buffer, pos: number): { c: Record<string, string[]>; pics: Buffer[] } {
     const c: Record<string, string[]> = {};
     const pics: Buffer[] = [];
@@ -252,7 +227,7 @@ function parseVorbisComments(b: Buffer, pos: number): { c: Record<string, string
         for (let i = 0; i < count && pos + 4 <= b.length; i++) {
             const len = b.readUInt32LE(pos);
             pos += 4;
-            if (len > 32 * 1024 * 1024 || pos + len > b.length) break; // truncated / spans pages
+            if (len > 32 * 1024 * 1024 || pos + len > b.length) break;
             const s = b.toString('utf8', pos, pos + len);
             pos += len;
             const eq = s.indexOf('=');
@@ -276,7 +251,7 @@ function parseFlacPicture(b: Buffer): { type: number; data: Buffer } | null {
         const mimeLen = b.readUInt32BE(4);
         let p = 8 + mimeLen;
         const descLen = b.readUInt32BE(p);
-        p += 4 + descLen + 16; // + width/height/depth/colors
+        p += 4 + descLen + 16;
         const dataLen = b.readUInt32BE(p);
         p += 4;
         if (p + dataLen > b.length) return null;
@@ -288,7 +263,7 @@ function readFlac(fd: number, fileSize: number): LocalTags | null {
     const head = Buffer.alloc(4);
     fs.readSync(fd, head, 0, 4, 0);
     let off = 0;
-    if (head.toString('latin1') === 'ID3') { // flac with a bolted-on id3 (rare, real)
+    if (head.toString('latin1') === 'ID3') {
         const hb = Buffer.alloc(10);
         fs.readSync(fd, hb, 0, 10, 0);
         off = 10 + synchsafe(hb, 6);
@@ -306,19 +281,19 @@ function readFlac(fd: number, fileSize: number): LocalTags | null {
         const size = (bh[1] << 16) | (bh[2] << 8) | bh[3];
         pos += 4;
         if (size > 0 && size < 64 * 1024 * 1024) {
-            if (type === 0 && size >= 18) { // STREAMINFO
+            if (type === 0 && size >= 18) {
                 const si = Buffer.alloc(18);
                 fs.readSync(fd, si, 0, 18, pos);
                 const rate = (si[10] << 12) | (si[11] << 4) | (si[12] >> 4);
                 const totalHi = si[13] & 0x0f;
                 const total = totalHi * 4294967296 + si.readUInt32BE(14);
                 if (rate > 0 && total > 0) t.duration = Math.round(total / rate);
-            } else if (type === 4) { // VORBIS_COMMENT
+            } else if (type === 4) {
                 const vb = Buffer.alloc(size);
                 fs.readSync(fd, vb, 0, size, pos);
                 const { c } = parseVorbisComments(vb, 0);
                 applyVorbisComment(c, t);
-            } else if (type === 6 && size < 16 * 1024 * 1024) { // PICTURE
+            } else if (type === 6 && size < 16 * 1024 * 1024) {
                 const pb = Buffer.alloc(size);
                 fs.readSync(fd, pb, 0, size, pos);
                 const pic = parseFlacPicture(pb);
@@ -333,11 +308,7 @@ function readFlac(fd: number, fileSize: number): LocalTags | null {
     return t;
 }
 
-// ---------------------------------------------------------------------------
-// wav: duration from fmt/data chunk math (what quodlibet's wave-module read
-// boils down to), tags from the RIFF LIST/INFO chunk and an embedded id3
-// chunk when some tagger left one. INFO ids per the RIFF spec.
-// ---------------------------------------------------------------------------
+// wav: duration from fmt/data chunk math
 
 const RIFF_INFO: Record<string, keyof Pick<LocalTags, 'title' | 'artist' | 'album'>> = { INAM: 'title', IART: 'artist', IPRD: 'album' };
 
@@ -389,8 +360,7 @@ function readWav(fd: number, fileSize: number): LocalTags | null {
     return t;
 }
 
-// aiff: big-endian chunks; COMM carries frames + an 80-bit float sample rate,
-// tags live in an 'ID3 ' chunk (this is what mutagen's aiff module reads too)
+// aiff: big-endian chunks
 function readAiff(fd: number, fileSize: number): LocalTags | null {
     const head = Buffer.alloc(12);
     fs.readSync(fd, head, 0, 12, 0);
@@ -425,10 +395,7 @@ function readAiff(fd: number, fileSize: number): LocalTags | null {
     return t;
 }
 
-// ---------------------------------------------------------------------------
-// ogg vorbis / opus: comments from the header packets near the start; duration
-// from the last page's granule position (samples) - scan the tail for "OggS".
-// ---------------------------------------------------------------------------
+// ogg vorbis / opus: comments from the header packets
 
 function readOgg(fd: number, fileSize: number): LocalTags | null {
     const headLen = Math.min(fileSize, 192 * 1024);
@@ -439,7 +406,7 @@ function readOgg(fd: number, fileSize: number): LocalTags | null {
     let granuleRate = 0;
     const opusAt = hb.indexOf('OpusHead');
     const vorbAt = hb.indexOf('\x01vorbis');
-    if (opusAt !== -1) granuleRate = 48000; // opus granules are always 48kHz
+    if (opusAt !== -1) granuleRate = 48000;
     else if (vorbAt !== -1 && vorbAt + 16 <= hb.length) granuleRate = hb.readUInt32LE(vorbAt + 12);
     // comment packet: OpusTags / \x03vorbis marker, comments follow immediately
     const opusTags = hb.indexOf('OpusTags');
@@ -469,24 +436,21 @@ function readOgg(fd: number, fileSize: number): LocalTags | null {
     return t;
 }
 
-// ---------------------------------------------------------------------------
 // m4a/mp4: atom tree - moov.mvhd for duration, moov.udta.meta.ilst for tags
-// (©nam/©ART/©alb/aART/©day/©gen/trkn/covr), like mutagen's mp4 module.
-// ---------------------------------------------------------------------------
 
 function readM4a(fd: number, fileSize: number): LocalTags | null {
     const probe = Buffer.alloc(12);
     fs.readSync(fd, probe, 0, 12, 0);
     if (probe.toString('latin1', 4, 8) !== 'ftyp') return null;
     const t = empty();
-    // moov is usually small (metadata only); cap the read defensively
+    // moov is usually small (metadata only)
     const findAtom = (start: number, end: number, name: string): { at: number; size: number } | null => {
         let pos = start;
         while (pos + 8 <= end) {
             const ab = Buffer.alloc(8);
             if (fs.readSync(fd, ab, 0, 8, pos) < 8) return null;
             let size = ab.readUInt32BE(0);
-            if (size === 1) { // 64-bit size
+            if (size === 1) {
                 const xb = Buffer.alloc(8);
                 fs.readSync(fd, xb, 0, 8, pos + 8);
                 size = xb.readUInt32BE(0) * 4294967296 + xb.readUInt32BE(4);
@@ -531,7 +495,7 @@ function readM4a(fd: number, fileSize: number): LocalTags | null {
     if (!udta) return t;
     const meta = scan(udta.at, udta.at + udta.size, 'meta');
     if (!meta) return t;
-    const ilst = scan(meta.at + 4, meta.at + meta.size, 'ilst'); // meta has 4 bytes version/flags
+    const ilst = scan(meta.at + 4, meta.at + meta.size, 'ilst');
     if (!ilst) return t;
     let pos = ilst.at;
     const end = Math.min(ilst.at + ilst.size, mb.length);
@@ -540,7 +504,6 @@ function readM4a(fd: number, fileSize: number): LocalTags | null {
         const size = mb.readUInt32BE(pos);
         if (size < 8) break;
         const name = mb.toString('latin1', pos + 4, pos + 8);
-        // child 'data' atom: 8 header + 4 type + 4 locale, then the payload
         const dataAt = pos + 16;
         const dataLen = mb.readUInt32BE(pos + 8) - 16;
         if (dataAt + 8 <= end && mb.toString('latin1', pos + 12, pos + 16) === 'data' && dataLen > 0 && dataAt + 8 + dataLen <= mb.length) {
@@ -571,11 +534,7 @@ function mergeMissing(into: LocalTags, from: LocalTags): void {
 
 export const AUDIO_EXTENSIONS = ['.mp3', '.flac', '.wav', '.ogg', '.opus', '.m4a', '.aiff', '.aif'];
 
-/**
- * read tags + duration + embedded art from a local audio file. never throws;
- * missing/broken metadata falls back to a filename parse ("Artist - Title",
- * quodlibet-style title-from-filename as the last resort).
- */
+// read tags + duration + embedded art
 export function readLocalTags(file: string): LocalTags {
     let t = empty();
     let fd = -1;
@@ -598,7 +557,6 @@ export function readLocalTags(file: string): LocalTags {
         } else if (head.toString('latin1', 4, 8) === 'ftyp') {
             t = readM4a(fd, fileSize) || t;
         } else {
-            // mp3 (or flac-with-id3): id3v2 header, then sniff what follows it
             let offset = 0;
             if (magic4.startsWith('ID3')) {
                 const hb = Buffer.alloc(10);
@@ -613,7 +571,7 @@ export function readLocalTags(file: string): LocalTags {
                 if (after.toString('latin1') === 'fLaC') {
                     const ft = readFlac(fd, fileSize);
                     if (ft) mergeMissing(t, ft);
-                    offset = -1; // not an mp3
+                    offset = -1;
                 }
             }
             if (offset >= 0) {
@@ -626,7 +584,6 @@ export function readLocalTags(file: string): LocalTags {
 
     if (!t.title) {
         const base = path.basename(file, path.extname(file)).replace(/_/g, ' ').trim();
-        // "01 Artist - Title" / "Artist - Title" filename conventions
         const m = base.match(/^(?:\d{1,3}[\s.\-_]+)?(.+?)\s+-\s+(.+)$/);
         if (m && !t.artist) { t.artist = m[1].trim(); t.title = m[2].trim(); }
         else t.title = base || 'untitled';

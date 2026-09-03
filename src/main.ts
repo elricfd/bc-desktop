@@ -19,8 +19,7 @@ import type { NowPlaying, ResolveStreamRequest, ResolveStreamResponse, TralbumTy
 const darkReaderPath = require.resolve('darkreader/darkreader.js');
 const darkReaderJS = fs.readFileSync(darkReaderPath, 'utf8');
 
-// last-resort crash telemetry: log to userData/crash.log (and the console) so a
-// hard crash actually says WHERE it happened instead of just closing the app.
+// last-resort crash telemetry: log to userData/crash.log
 process.on('uncaughtException', (err) => {
     const line = new Date().toISOString() + ' uncaught: ' + ((err && (err.stack || err)) || 'unknown') + '\n';
     try { fs.appendFileSync(path.join(app.getPath('userData'), 'crash.log'), line); } catch { /* disk */ }
@@ -42,8 +41,7 @@ const SEARCHBOX_CSS = `
     }
 `;
 
-// light theme: keep bandcamp's own look, just hide scrollbars & the banner. no
-// opacity cloak (that waits on darkreader, which is off in light mode).
+// light theme: keep bandcamp's own look, just hide scrollbars & the banner
 const LIGHT_CSS = `
     * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
     ::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
@@ -51,13 +49,11 @@ const LIGHT_CSS = `
     body.home .editorial-recommendations-banner { display: block !important; }
 `;
 
-// per-navigation theme css. the cloak is injected here AND in the preload -
-// dropping either one lets a flash of light-mode bandcamp show on page change.
+// per-navigation theme css
 const ANTI_FLASH_CSS = `
     html { background-color: #181a1b !important; }
     html:not([data-darkreader-scheme="dark"]) body { opacity: 0 !important; }
 
-    /* hide every scrollbar app wide (content still scrolls). */
     * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
     ::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 
@@ -100,8 +96,7 @@ const ANTI_FLASH_CSS = `
 
 const store = new Store({ clearInvalidConfig: true });
 
-// --- big on-disk caches: these outgrew electron-store (conf rewrites config.json
-// synchronously per access), so they live in their own files with debounced writes.
+// --- big on-disk caches (own files, debounced writes) ------------------------
 class DiskCache<T> {
     private data: T;
     private timer: ReturnType<typeof setTimeout> | null = null;
@@ -127,26 +122,21 @@ class DiskCache<T> {
     sizeBytes(): number { try { return fs.statSync(this.file).size; } catch { return 0; } }
 }
 type IndexCacheEntryT = { g: string[]; t: [string, number][]; y: number; a?: string };
-// custom playlists built from the collection view. entries are materialized tracks;
-// stream urls expire, so playback resolves them lazily (player:resolve-stream).
+// custom playlists built from the collection view
 type PlaylistEntryT = {
     id: string; title: string; artist: string; album: string; art: string;
     duration: number; url: string; bandId: string; tralbumId: string; tralbumType: TralbumType;
 };
 type PlaylistT = {
     id: string; name: string; createdAt: number; entries: PlaylistEntryT[]; desc?: string; cover?: string;
-    /** bandcamp playlist id when imported - re-imports update in place */
     bcId?: number;
 };
-// local files library (quodlibet-style: files are parsed once into a queryable
-// index keyed by path - the on-disk folder layout is irrelevant afterwards)
+// local files library: files are parsed once into an index keyed by path
 type LocalTrackT = {
     id: string; file: string; title: string; artist: string; album: string; albumArtist: string;
     year: number; trackNum: number; genre: string[]; duration: number;
-    /** extracted embedded cover, cached under userData/local-art; '' when none */
     art: string;
     addedAt: number;
-    /** file mtime at import; lets the folder scan skip unchanged files */
     mtime?: number;
 };
 let releaseIndexDisk: DiskCache<Record<string, IndexCacheEntryT>>;
@@ -161,7 +151,6 @@ function initDiskCaches(): void {
     yearsDisk = new DiskCache(path.join(ud, 'year-cache.json'), {});
     playlistsDisk = new DiskCache(path.join(ud, 'playlists.json'), []);
     localFilesDisk = new DiskCache(path.join(ud, 'local-files.json'), []);
-    // one-time migration out of config.json (also shrinks it back to settings-only)
     try {
         const oldIdx = store.get('releaseIndexCache') as any;
         if (oldIdx && typeof oldIdx === 'object' && !Object.keys(releaseIndexDisk.get()).length) releaseIndexDisk.replace(oldIdx);
@@ -175,8 +164,7 @@ function initDiskCaches(): void {
     } catch { /* start with fresh caches */ }
 }
 
-// --- local files library helpers: ids are namespaced 'local:…'; every resolver
-// must branch on that prefix BEFORE bandcamp id math (toIdStr would mangle them).
+// --- local files library helpers (ids are namespaced 'local:…') -------------
 const LOCAL_PREFIX = 'local:';
 /** owned = collection item with a redownload url; all downloading is gated on this. */
 function ownsRelease(type: unknown, id: unknown): boolean {
@@ -188,11 +176,11 @@ function ownsRelease(type: unknown, id: unknown): boolean {
 const isLocalId = (id: unknown): boolean => String(id || '').startsWith(LOCAL_PREFIX);
 const localFileUrl = (p: string): string => { try { return p ? pathToFileURL(p).href : ''; } catch { return ''; } };
 function localAlbumKey(t: { albumArtist: string; artist: string; album: string; id: string }): string {
-    if (!t.album) return LOCAL_PREFIX + t.id; // untagged file: its own card
+    if (!t.album) return LOCAL_PREFIX + t.id;
     const h = crypto.createHash('md5').update(((t.albumArtist || t.artist) + '\0' + t.album).toLowerCase()).digest('hex').slice(0, 16);
     return LOCAL_PREFIX + h;
 }
-// grouped local library memoized against array identity + length.
+// grouped local library memoized against array identity + length
 let localGroupsCache: { src: LocalTrackT[]; len: number; map: Map<string, LocalTrackT[]> } | null = null;
 function localGroups(): Map<string, LocalTrackT[]> {
     const lib = localFilesDisk.get();
@@ -239,15 +227,14 @@ function localTrackById(id: unknown): LocalTrackT | undefined {
 
 let mainWindow: BrowserWindow;
 let headerView: BrowserView;
-// contentView is an alias for the *active* tab's view; every place that navigates
-// / traps / injects operates on it. background tabs stay alive but off screen.
+// contentView is an alias for the *active* tab's view; every place that navigates / traps / injects operates on it
 let contentView: BrowserView;
 let playerView: BrowserView;
 let collectionView: BrowserView;
 let collectionVisible = false;
 let feedView: BrowserView;
 let feedVisible = false;
-let spotlightWin: BrowserWindow | null = null; // macOS-spotlight-style search popup
+let spotlightWin: BrowserWindow | null = null;
 
 interface Tab { id: number; view: BrowserView; title: string; }
 let tabs: Tab[] = [];
@@ -279,7 +266,7 @@ if (!gotTheLock) {
     process.exit(0);
 }
 
-// second-instance launch while hidden to tray: bring the window back.
+// second-instance launch while hidden to tray: bring the window back
 function showMainWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -287,7 +274,7 @@ function showMainWindow() {
     mainWindow.focus();
 }
 app.on('second-instance', showMainWindow);
-app.on('activate', showMainWindow); // macOS dock click
+app.on('activate', showMainWindow);
 
 function adjustContentViews() {
     if (!mainWindow || !contentView || !headerView || !playerView) return;
@@ -312,14 +299,12 @@ function adjustContentViews() {
         height: height - (headerHeight + playerHeight),
     };
     contentView.setBounds(contentRect);
-    // collection / feed views (added only while open) fill the content area
     if (collectionView && collectionVisible) collectionView.setBounds(contentRect);
     if (feedView && feedVisible) feedView.setBounds(contentRect);
 }
 
 function setupTray() {
-    // macOS menu bar wants a 16pt template image (trayTemplate.png + @2x); the 64px
-    // app icon rendered at its natural size there
+    // macOS menu bar wants a 16pt template image (trayTemplate.png + @2x)
     const iconPath = path.join(__dirname, isMac ? '../assets/trayTemplate.png' : '../assets/bandcamp-button-circle-black-64.png');
     tray = new Tray(nativeImage.createFromPath(iconPath));
     tray.setToolTip('Bandcamp Desktop');
@@ -331,14 +316,12 @@ function setupTray() {
         { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
     ]);
     const toggle = () => {
-        // mac: a visible-but-background window comes forward instead of hiding
         const hideIt = isMac ? (mainWindow.isVisible() && mainWindow.isFocused()) : mainWindow.isVisible();
         if (hideIt) mainWindow.hide();
         else showMainWindow();
     };
     if (isMac) {
-        // setContextMenu makes a LEFT click open the menu on macOS (no click event),
-        // so toggling took two clicks; keep the menu on right click only
+        // macOS: setContextMenu would make a left click open the menu instead of toggling
         tray.on('click', toggle);
         tray.on('right-click', () => tray?.popUpContextMenu(menu));
     } else {
@@ -347,14 +330,13 @@ function setupTray() {
     }
 }
 
-// mac: after a drag-install the .dmg is usually still mounted. on the first launch
-// from /Applications offer to eject it and move the image to the Trash (once per image).
+// mac: after a drag-install the .dmg is usually still mounted
 const run = (file: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) =>
     execFile(file, args, { timeout }, (err, out) => (err ? reject(err) : resolve(String(out)))));
 async function offerInstallerCleanup(): Promise<void> {
     if (!isMac || !app.isPackaged || !mainWindow || mainWindow.isDestroyed()) return;
     const bundle = path.resolve(process.execPath, '../../..');
-    if (bundle.startsWith('/Volumes/')) return; // running straight from the dmg: ejecting would kill us
+    if (bundle.startsWith('/Volumes/')) return;
     let images: any[] = [];
     try {
         images = JSON.parse(await run('/bin/sh', ['-c', 'hdiutil info -plist | plutil -convert json -o - -'], 8000)).images || [];
@@ -388,7 +370,6 @@ function keepChildVisible(win: BrowserWindow): void {
 
 function openSettings() {
     if (settingsWindow && !settingsWindow.isDestroyed()) {
-        // focus() alone does nothing for a window that got hidden with its parent
         if (settingsWindow.isMinimized()) settingsWindow.restore();
         if (!settingsWindow.isVisible()) settingsWindow.show();
         keepChildVisible(settingsWindow);
@@ -403,8 +384,6 @@ function openSettings() {
         resizable: false,
         title: 'Settings',
         backgroundColor: '#181a1b',
-        // frameless w/ our own titlebar: native close btn on windows can stick in its
-        // hover state when the cursor leaves via the client area, so we own the control
         frame: false,
         webPreferences: { nodeIntegration: true, contextIsolation: false }
     });
@@ -434,8 +413,7 @@ function closeSearch() {
     if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('gsearch:state', false);
 }
 
-// external hosts that pop a separate window; kept small so checkout/oauth
-// redirects (paypal, stripe, google, facebook) stay in-app.
+// external hosts that pop a separate window
 const SOCIAL_HOSTS = [
     'instagram.com', 'twitter.com', 'x.com', 'facebook.com', 'youtube.com', 'youtu.be',
     'tiktok.com', 'spotify.com', 'open.spotify.com', 'soundcloud.com', 'music.apple.com',
@@ -451,14 +429,12 @@ function isSocialHost(url: string): boolean {
 
 function toIdStr(v: unknown): string { const m = String(v ?? '').match(/\d+/); return m ? m[0] : ''; }
 
-// ui theme: dark (darkreader) by default; unchecking the "dark mode" setting
-// switches to 'light' = bandcamp's native look.
+// ui theme: dark (darkreader) by default
 function getTheme(): 'dark' | 'light' {
     return store.get('theme', 'dark') === 'light' ? 'light' : 'dark';
 }
 
-// artist/label pages (subdomains & custom domains) vs core app pages,
-// for the "don't darken artist pages" option.
+// artist/label pages
 function isArtistPage(url: string): boolean {
     try {
         const h = new URL(url).hostname.toLowerCase();
@@ -466,8 +442,7 @@ function isArtistPage(url: string): boolean {
     } catch { return false; }
 }
 
-// fan playlist pages ship their own dark design; darkreader double-inverts it
-// into weird colors, so they're always exempt (our chrome stays dark regardless).
+// fan playlist pages ship their own dark design
 function isPlaylistPage(url: string): boolean {
     try {
         const u = new URL(url);
@@ -475,8 +450,7 @@ function isPlaylistPage(url: string): boolean {
     } catch { return false; }
 }
 
-// effective theme per page: dark, except artist pages (unless opted in)
-// and natively-dark playlist pages.
+// effective theme per page: dark, except artist pages (unless opted in) and natively-dark playlist pages
 function themeForUrl(url: string): 'dark' | 'light' {
     if (getTheme() === 'light') return 'light';
     if (isPlaylistPage(url)) return 'light';
@@ -484,11 +458,9 @@ function themeForUrl(url: string): 'dark' | 'light' {
     return 'dark';
 }
 
-// opt-in on-disk release cache: covers + the release index (tracklists, tags,
-// album info) + the collection listing itself. audio is never cached.
+// opt-in on-disk release cache: covers + the release index
 function cacheReleasesOn(): boolean { return store.get('cacheReleases', false) === true; }
-// which window-bar controls are visible; home defaults hidden.
-// app shortcuts (settings -> Keybinds), matched via before-input-event on every view.
+// which window-bar controls are visible; home defaults hidden
 const SHORTCUT_DEFAULTS: Record<string, string> = {
     collection: 'Ctrl+Shift+C',
     feed: 'Ctrl+Shift+F',
@@ -526,8 +498,7 @@ function getHeaderButtons(): Record<string, boolean> {
     }
     return out;
 }
-// covers dir, resolved once (used to re-read settings + stat + mkdir per
-// collection item, thousands of blocking calls per send); picker invalidates.
+// covers dir, resolved once
 let artDirMemo = '';
 function artCacheDir(): string {
     if (artDirMemo) return artDirMemo;
@@ -553,8 +524,7 @@ function cacheSizeBytes(): number {
 function artCachePath(type: string, id: string): string {
     return path.join(artCacheDir(), type + toIdStr(id) + '.jpg');
 }
-// one directory listing serves every lookup: the old per-item existsSync was
-// a synchronous syscall for each of thousands of collection items.
+// one directory listing serves every cover lookup
 let artNamesMemo: { dir: string; names: Set<string> } | null = null;
 function artCacheNames(): Set<string> {
     const dir = artCacheDir();
@@ -591,8 +561,7 @@ function getDownloadDir(): string {
     return app.getPath('downloads');
 }
 
-// small transient toast painted into the content page (appears right where the
-// user acted, e.g. after copying a link or finishing a download)
+// small transient toast painted into the content page
 function pageToast(msg: string) {
     if (!contentView || contentView.webContents.isDestroyed()) return;
     const js =
@@ -604,8 +573,7 @@ function pageToast(msg: string) {
     contentView.webContents.executeJavaScript(js).catch(() => {});
 }
 
-// open a bandcamp url in a plain secondary window (middle click / open in new window).
-// shares the default session so fan login cookies carry over.
+// open a bandcamp url in a plain secondary window (middle click / open in new window)
 function openInNewWindow(url: string) {
     if (!/^https?:\/\//i.test(url)) return;
     const win = new BrowserWindow({
@@ -624,13 +592,12 @@ function openInNewWindow(url: string) {
 
 async function init() {
     Menu.setApplicationMenu(null);
-    initDiskCaches(); // big caches out of config.json (see DiskCache)
+    initDiskCaches();
     presenceService = new PresenceService(store);
     lastfmService = new LastfmService(store);
     bandcampApi = new BandcampApi(() => (contentView ? contentView.webContents.session : null));
 
-    // surface bandcamp's HTTP 429 throttling in our own styled window, at most
-    // once per session; "Don't show again" persists the opt-out.
+    // surface bandcamp's HTTP 429 throttling in our own styled window, at most once per session
     let notice429Shown = false;
     let notice429Win: BrowserWindow | null = null;
     bandcampApi.on429 = () => {
@@ -640,7 +607,7 @@ async function init() {
         try {
             notice429Win = new BrowserWindow({
                 width: 470, height: 220, parent: mainWindow, frame: false, resizable: false,
-                backgroundColor: '#181a1b', // opaque: transparent windows are crash-prone on some setups
+                backgroundColor: '#181a1b',
                 webPreferences: { nodeIntegration: true, contextIsolation: false },
             });
             keepChildVisible(notice429Win);
@@ -681,8 +648,6 @@ async function init() {
     });
     playerView.setBackgroundColor('#181a1b');
 
-    // first tab. contentView aliases the *active* tab's view; more tabs open via
-    // middle-click (bandcamp links) or the + button and all share the one player.
     contentView = makeContentView();
     tabs = [{ id: ++tabSeq, view: contentView, title: 'Bandcamp' }];
     activeTabId = tabSeq;
@@ -710,17 +675,14 @@ async function init() {
     mainWindow.addBrowserView(contentView);
     mainWindow.addBrowserView(headerView);
     mainWindow.addBrowserView(playerView);
-    // collectionview added on demand when toggled open (see collection:toggle)
 
-    wireContentView(contentView); // attach nav/trap/theme/context-menu handlers
+    wireContentView(contentView);
 
     collectionView.webContents.loadFile(path.join(__dirname, 'collection', 'collection.html'));
     feedView.webContents.loadFile(path.join(__dirname, 'feed', 'feed.html'));
-    // shortcuts work no matter which pane has focus
     for (const v of [headerView, playerView, collectionView, feedView]) wireShortcutsOn(v.webContents);
 
-    // opt-in (off by default): pre-fetch the collection shortly after startup
-    // so opening the view is instant.
+    // opt-in (off by default): pre-fetch the collection shortly after startup so opening the view is instant
     collectionView.webContents.once('did-finish-load', () => {
         if (store.get('autoLoadCollection', false) !== true) return;
         setTimeout(() => {
@@ -736,7 +698,6 @@ async function init() {
     mainWindow.on('restore', adjustContentViews);
 
     mainWindow.on('close', (event) => {
-        // close to tray by default; when off closing window quits app
         const closeToTray = store.get('closeToTray', true) !== false;
         if (closeToTray && !isQuitting) { event.preventDefault(); mainWindow.hide(); }
     });
@@ -754,8 +715,7 @@ async function init() {
                (url.includes('.m3u8') && (url.includes('sndcdn') || url.includes('soundcloud')));
     };
 
-    // which track a trapped stream url is for, so the throttle can dedupe
-// by track (urls carry rotating tokens).
+    // which track a trapped stream url is for, so the throttle can dedupe by track (urls carry rotating tokens)
     const streamTrackId = (url: string): string => {
         try {
             const u = new URL(url);
@@ -768,8 +728,7 @@ async function init() {
         return '';
     };
 
-    // act only on traps that follow a real user gesture; the page player's
-    // auto-advance re-requests have none and must not hijack the queue.
+    // act only on traps that follow a real user gesture
     let lastActedId = '';
     let lastActedAt = 0;
     let userGestureAt = 0;
@@ -778,7 +737,7 @@ async function init() {
     // app-wide customizable shortcuts (collection / feed / home / downloads / search)
     function handleShortcut(input: Electron.Input): boolean {
         if (input.type !== 'keyDown') return false;
-        if (!input.control && !input.alt && !input.meta) return false; // never hijack typing
+        if (!input.control && !input.alt && !input.meta) return false;
         const accel = accelOfInput(input);
         if (!accel) return false;
         const sc = getShortcuts();
@@ -794,30 +753,23 @@ async function init() {
     }
 
     let trapSeq = 0;
-    // assigned once the collection fetcher exists; fired (debounced) whenever the
-    // fan collects/uncollects something on a bandcamp page
+    // assigned once the collection fetcher exists
     let onCollectAction: ((removal: boolean) => void) | null = null;
     ipcMain.on('player:user-gesture', () => { gestureSeen = true; userGestureAt = Date.now(); });
 
-    // net trap & tracklist extractor
     session.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
         const reqUrl = details.url;
 
         if (isAudioStream(reqUrl)) {
-            // only trap the active tab's audio; background tabs & the player view
-            // are left to stream (background tabs are muted, so this is silent)
             if (contentView && details.webContentsId === contentView.webContents.id) {
                 callback({ cancel: true });
 
                 const now = Date.now();
                 const trapId = streamTrackId(reqUrl);
-                // same track re trapped for multi chunk preflight or instant retry.
                 if (trapId && trapId === lastActedId && now - lastActedAt < 1500) {
                     if (devMode) console.log('[bcrpc] trap skip (dup) id=' + trapId);
                     return;
                 }
-                // act only on the first trap of a burst: the extractor owns the queue
-                // from there; re-running per track trips bandcamp's 429.
                 const authorized = gestureSeen
                     ? (userGestureAt !== 0 && now - userGestureAt < 5000)
                     : (now >= fallbackCooldownUntil);
@@ -825,28 +777,22 @@ async function init() {
                     if (devMode) console.log('[bcrpc] trap skip (' + (gestureSeen ? 'no gesture' : 'cooldown') + ') id=' + trapId);
                     return;
                 }
-                if (gestureSeen) userGestureAt = 0; // consume gesture
+                if (gestureSeen) userGestureAt = 0;
                 else fallbackCooldownUntil = now + 1200;
                 lastActedId = trapId;
                 lastActedAt = now;
 
                 const format = reqUrl.includes('.m3u8') ? 'hls' : 'raw';
-                // apply only the most recent authorized trap; older in-flight resolutions are dropped (trapSeq bumps on nav)
                 const seq = ++trapSeq;
 
-                // don't pre-play the trapped stream: on the collection page it's the item's
-                // featured track, not track 1 - the resolved queue below drives playback.
 
                 if (devMode) {
                     console.log('[bcrpc] trap fire id=' + trapId + ' ' + reqUrl.slice(0, 90));
-                    // snapshot the page to see why the surface resolved the way it did
                     contentView.webContents.executeJavaScript(
                         "({u:location.href,cap:!!window.__bcrpcCapture,dn:Object.keys((window.__bcrpc&&window.__bcrpc.discover)||{}).length,pl:!!document.getElementById('PlaylistPage'),td:!!window.TralbumData})"
                     ).then((s: any) => console.log('[bcrpc] page ' + JSON.stringify(s))).catch(() => {});
                 }
 
-                // the extractor runs in page context, pauses the page player,
-                // then resolves the full queue.
                 contentView.webContents.executeJavaScript(buildExtractorScript(reqUrl, format))
                     .then((data: any) => {
                         const stale = seq !== trapSeq;
@@ -857,7 +803,7 @@ async function init() {
                                   ' title=' + (a && a.title) + ' artist=' + (a && a.artist) + ' album=' + (a && a.album) + ' srcLen=' + ((a && a.src) || '').length
                                 : 'EMPTY'));
                         }
-                        if (stale) return; // newer play (or nav) superseded this one
+                        if (stale) return;
                         if (data?.queue?.length && playerView && !playerView.webContents.isDestroyed()) {
                             playerView.webContents.send('player:stream-incoming', data);
                         }
@@ -871,11 +817,7 @@ async function init() {
             }
         }
 
-        // (playlist header play button never streams, so it can't be trapped;
-        // the preload click hook below drives the extractor directly instead)
 
-        // *collect_item_cb posts = wishlist/collection changes: refresh the view.
-        // removals force a silent full re-scan (only a re-scan finds what vanished).
         if (/\/(?:un)?collect_item_cb|\/wishlist_cb|hide_unhide_item/.test(reqUrl)) {
             const removal = /uncollect_item_cb|hide_unhide_item/.test(reqUrl);
             try { onCollectAction && onCollectAction(removal); } catch { /* not ready yet */ }
@@ -884,8 +826,7 @@ async function init() {
         callback({ cancel: false });
     });
 
-    // fan playlist page play buttons: the preload intercepts them (track 1 preloads
-    // with no stream request, so the trap never fires) and we queue the page's data-blob.
+    // fan playlist page play buttons: the preload intercepts them
     ipcMain.on('app:playlist-play', (_e, index?: unknown) => {
         if (!contentView || contentView.webContents.isDestroyed()) return;
         const seq = ++trapSeq;
@@ -909,7 +850,6 @@ async function init() {
                 }
                 return;
             }
-            // old page shape: the legacy extractor still recognizes it
             contentView.webContents.executeJavaScript(buildExtractorScript('about:playlist', 'raw'))
                 .then((data: any) => {
                     if (seq !== trapSeq) return;
@@ -933,19 +873,15 @@ async function init() {
         callback({ cancel: false, responseHeaders });
     });
 
-    // spoof cdn referer headers
     session.webRequest.onBeforeSendHeaders((details, callback) => {
         if (details.url.includes('google') || details.url.includes('discord')) {
             callback({ requestHeaders: details.requestHeaders });
             return;
         }
         const headers = { ...details.requestHeaders };
-        // spoof referer/origin for the media CDNs and base bandcamp.com apis, but NOT
-        // artist subdomains (forcing Origin there makes bandcamp reject collect_item_cb).
         let host = '';
         try { host = new URL(details.url).hostname.toLowerCase(); } catch { /* leave blank */ }
-        // exact-suffix host checks (host.endsWith('bcbits.com') would also match
-        // evilbcbits.com, host.includes('sndcdn') matches anything - CWE-20)
+        // exact-suffix host checks
         const hostIs = (d: string) => host === d || host.endsWith('.' + d);
         const isBaseBandcamp = host === 'bandcamp.com' || host === 'www.bandcamp.com';
         if (isBaseBandcamp || hostIs('bcbits.com') || hostIs('sndcdn.com')) {
@@ -965,8 +901,7 @@ async function init() {
     });
     ipcMain.on('window:close', () => mainWindow.close());
 
-    // a mouse back/fwd click can fire BOTH an os app-command and a page mouseup;
-    // latch on the first of a burst so it counts as one nav.
+    // a mouse back/fwd click can fire BOTH an os app-command and a page mouseup
     let lastNavAt = 0;
     const navGo = (dir: 'back' | 'forward') => {
         const now = Date.now();
@@ -976,8 +911,7 @@ async function init() {
         if (dir === 'back' && nav.canGoBack()) nav.goBack();
         else if (dir === 'forward' && nav.canGoForward()) nav.goForward();
     };
-    // force navigation even when the page is wedged (bandcamp's >1000-item collection
-    // sort hangs its renderer): drop a hung renderer, else stop the pending load.
+    // force navigation even when the page is wedged
     const hardLoad = (url: string) => {
         const wc = contentView.webContents;
         try {
@@ -998,8 +932,7 @@ async function init() {
         if ((wc as any).__hung || wc.isCrashed()) hardLoad(wc.getURL() || 'https://bandcamp.com');
         else wc.reload();
     });
-    // home btn returns to the homepage, closing the collection overlay if it's open.
-    // uses hardLoad so it always works even from a wedged collection page.
+    // home btn returns to the homepage, closing the collection overlay if it's open
     ipcMain.on('app:home', () => {
         closeCollection();
         closeFeed();
@@ -1007,8 +940,7 @@ async function init() {
         hardLoad('https://bandcamp.com');
     });
 
-    // clicking track title / artist name in player bar (or a feed card) navs page;
-    // close the overlays so the page isn't loading invisibly underneath them
+    // clicking track title / artist name in player bar (or a feed card) navs page
     ipcMain.on('app:navigate', (_e, url: unknown) => {
         if (typeof url === 'string' && url.startsWith('https://')) {
             closeCollection();
@@ -1034,9 +966,9 @@ async function init() {
     ipcMain.on('collection:toggle', () => {
         collectionVisible = !collectionVisible;
         if (collectionVisible) {
-            closeFeed(); closeSearch(); // one overlay at a time
+            closeFeed(); closeSearch();
             mainWindow.addBrowserView(collectionView);
-            mainWindow.setTopBrowserView(headerView); // keep header/player above it
+            mainWindow.setTopBrowserView(headerView);
             mainWindow.setTopBrowserView(playerView);
             adjustContentViews();
             collectionView.webContents.send('collection:shown');
@@ -1055,9 +987,9 @@ async function init() {
     ipcMain.on('feed:toggle', () => {
         feedVisible = !feedVisible;
         if (feedVisible) {
-            closeCollection(); closeSearch(); // one overlay at a time
+            closeCollection(); closeSearch();
             mainWindow.addBrowserView(feedView);
-            mainWindow.setTopBrowserView(headerView); // keep header/player above it
+            mainWindow.setTopBrowserView(headerView);
             mainWindow.setTopBrowserView(playerView);
             adjustContentViews();
             feedView.webContents.send('feed:shown');
@@ -1070,7 +1002,7 @@ async function init() {
     });
     ipcMain.on('feed:close', () => closeFeed());
 
-    // one page of the fan feed; olderThan pages backwards (0 = newest)
+    // one page of the fan feed
     ipcMain.handle('feed:fetch', async (_e, olderThan: unknown) => {
         const res = await bandcampApi.fetchFeed(Number(olderThan) || 0);
         if (devMode) console.log('[bcrpc] feed:fetch older=' + olderThan + ' -> ' + res.stories.length + (res.error ? ' err=' + res.error : ''));
@@ -1094,8 +1026,7 @@ async function init() {
             spotlightWin.webContents.on('did-finish-load', () => {
                 if (spotlightWin && !spotlightWin.isDestroyed()) spotlightWin.webContents.send('gsearch:shown');
             });
-            // esc handled in MAIN so it works no matter what the page does;
-            // the search shortcut itself also toggles the popup closed.
+            // esc handled in MAIN so it works no matter what the page does
             spotlightWin.webContents.on('before-input-event', (event, input) => {
                 if (input.type !== 'keyDown') return;
                 if (input.key === 'Escape') { event.preventDefault(); closeSearch(); return; }
@@ -1118,8 +1049,7 @@ async function init() {
         return bandcampApi.searchPublic(String(req?.text || ''), f as any);
     });
 
-    // fetch the whole fan collection (paginated), streaming a running count back;
-    // with the release cache on it persists offline and art swaps to local covers.
+    // fetch the whole fan collection (paginated), streaming a running count back
     const mapCachedArt = (list: any[]): any[] => {
         if (!cacheReleasesOn()) return list;
         return list.map((i) => {
@@ -1132,15 +1062,12 @@ async function init() {
             collectionView.webContents.send('collection:items', { items: mapCachedArt(added), soFar, total });
         }
     };
-    // cache-first: the saved listing loads instantly and the network only fetches
-    // items newer than the cache. the wishlist rides along (wish:true).
+    // cache-first: the saved listing loads instantly and the network only fetches items newer than the cache
     let collFetchActive = false;
     const fetchCollectionAndWishlist = async (fullRescan = false): Promise<{ ok: boolean; count: number; cached?: boolean; error?: string }> => {
         if (collFetchActive) return { ok: true, count: 0 };
         collFetchActive = true;
         try {
-            // local files first: they live on disk, so they show even offline /
-            // logged out (total 0 = don't touch the loader's progress accounting)
             const locals = localCollectionItems();
             if (locals.length) sendCollItems(locals, locals.length, 0);
             const cached = (!fullRescan && cacheReleasesOn()) ? collectionItemsDisk.get() : [];
@@ -1151,12 +1078,9 @@ async function init() {
                     const knownWish = new Set<string>(cached.filter((c: any) => c.wish).map((c: any) => c.tralbumType + c.tralbumId));
                     const freshOwned = await bandcampApi.fetchCollection(20000, undefined, knownOwned, 'collection');
                     const freshWish = await bandcampApi.fetchCollection(20000, undefined, knownWish, 'wishlist');
-                    // an item that got purchased graduates from wishlist to owned
                     const ownedKeys = new Set<string>(freshOwned.map((c) => c.tralbumType + c.tralbumId));
                     const fresh = [...freshOwned, ...freshWish.filter((c) => !ownedKeys.has(c.tralbumType + c.tralbumId))];
                     if (devMode) console.log('[bcrpc] collection:fetch cache=' + cached.length + ' new=' + fresh.length);
-                    // owned count dropped on bandcamp's side: schedule a silent full re-scan
-                    // so the vanished item disappears here too.
                     const ownedTotal = await bandcampApi.fetchOwnedTotal();
                     const ownedHave = [...fresh, ...cached.filter((c: any) => !fresh.some((f) => f.tralbumType + f.tralbumId === c.tralbumType + c.tralbumId))]
                         .filter((c: any) => !c.wish).length;
@@ -1166,8 +1090,6 @@ async function init() {
                     if (fresh.length) {
                         const freshKeys = new Set<string>(fresh.map((c) => c.tralbumType + c.tralbumId));
                         const merged = [...fresh, ...cached.filter((c: any) => !freshKeys.has(c.tralbumType + c.tralbumId))];
-                        // safety net for caches written before wish was explicit:
-                        // if a key somehow exists twice, the owned copy wins
                         const byKey = new Map<string, any>();
                         for (const it of merged) {
                             const k = it.tralbumType + it.tralbumId;
@@ -1184,7 +1106,6 @@ async function init() {
                 } catch { /* cache alone is fine */ }
                 return { ok: true, count: cached.length, cached: true };
             }
-            // no cache (or forced rescan): full paginated fetch of both lists
             try {
                 const owned = await bandcampApi.fetchCollection(20000, sendCollItems, undefined, 'collection');
                 const ownedKeys = new Set<string>(owned.map((c) => c.tralbumType + c.tralbumId));
@@ -1194,8 +1115,6 @@ async function init() {
                 if (devMode) console.log('[bcrpc] collection:fetch ' + owned.length + ' owned + ' + wish.length + ' wishlist');
                 if (items.length) {
                     if (cacheReleasesOn()) collectionItemsDisk.replace(items);
-                    // a re-scan is the source of truth: prune what bandcamp no longer lists
-                    // (local pseudo-items aren't bandcamp's to prune - keep their keys).
                     if (collectionView && !collectionView.webContents.isDestroyed()) {
                         collectionView.webContents.send('collection:prune',
                             [...items.map((c) => c.tralbumType + c.tralbumId), ...localCollectionItems().map((c) => c.tralbumType + c.tralbumId)]);
@@ -1217,7 +1136,6 @@ async function init() {
         onCollectAction = (removal: boolean) => {
             collectRemoval = collectRemoval || removal;
             if (collectTimer) clearTimeout(collectTimer);
-            // small delay so bandcamp finishes committing the change first
             collectTimer = setTimeout(() => {
                 const full = collectRemoval;
                 collectRemoval = false;
@@ -1226,8 +1144,7 @@ async function init() {
         };
     }
 
-    // a purchased TRACK in an album carries no artist/art of its own -
-    // resolve it through its parent album.
+    // a purchased TRACK in an album carries no artist/art of its own - resolve it through its parent album
     const resolveRelease = async (req: { tralbumId: string; tralbumType: TralbumType; bandId: string }): Promise<{ tracks: PlayerTrack[]; activeIndex: number }> => {
         if (isLocalId(req.tralbumId)) return { tracks: localPlayerTracks(String(req.tralbumId)), activeIndex: 0 };
         if (req.tralbumType === 't') {
@@ -1244,19 +1161,14 @@ async function init() {
             const resolved = await resolveRelease(req);
             let tracks = resolved.tracks;
             if (tracks.length && playerView && !playerView.webContents.isDestroyed()) {
-                // start at the chosen track (by id, else index) so the whole album
-                // becomes the queue with the rest of it queued behind
                 let active = typeof req.activeIndex === 'number' ? req.activeIndex : resolved.activeIndex;
-                // raw compare too: local track ids ('L…') aren't numeric
                 if (req.trackId) { const i = tracks.findIndex((t) => t.id === toIdStr(req.trackId) || t.id === String(req.trackId)); if (i !== -1) active = i; }
                 active = Math.max(0, Math.min(active, tracks.length - 1));
-                // a single-track purchase plays JUST that track - resolving through
-                // the parent album is only for metadata, not to queue the whole thing
                 if (req.trackOnly) {
                     tracks = [tracks[active]];
                     active = 0;
                 }
-                trapSeq++; // supersede any in flight page trap
+                trapSeq++;
                 playerView.webContents.send('player:stream-incoming', {
                     queue: tracks, activeIndex: active, context: 'collection', format: 'raw',
                 });
@@ -1272,7 +1184,6 @@ async function init() {
     ipcMain.handle('collection:tracklist', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string }) => {
         try {
             if (isLocalId(req.tralbumId)) {
-                // local pseudo-album: everything comes from the library, no network
                 const group = localGroups().get(String(req.tralbumId)) || [];
                 if (!group.length) return { ok: false, error: 'no tracks' };
                 const first = group[0];
@@ -1288,8 +1199,6 @@ async function init() {
             }
             const k = (req.tralbumType === 't' ? 't' : 'a') + toIdStr(req.tralbumId);
             const idxCache = releaseIndexDisk.get();
-            // the live fetch is opportunistic, NOT a requirement: when it fails
-            // (offline, api down) the saved index serves the tracklist instead.
             let tracks: PlayerTrack[] = [];
             try { tracks = (await resolveRelease(req)).tracks; } catch { tracks = []; }
             if (devMode) console.log('[bcrpc] collection:tracklist ' + req.tralbumType + req.tralbumId + ' band=' + req.bandId + ' -> ' + tracks.length + ' tracks');
@@ -1308,11 +1217,8 @@ async function init() {
             let year = 0;
             try { year = bandcampApi.getReleaseYear(req.tralbumType, req.tralbumId) || await bandcampApi.fetchReleaseYear(req); } catch { year = 0; }
             if (year) persistYear(req.tralbumType, req.tralbumId, year);
-            // genre tags for the panel: from the release index when it has them
-            // (a collection item's fetch here also fills the persistent cache)
             let tags: string[] = idxCache[k]?.g || sessionDetails.get(k)?.g || [];
             if (!tags.length && !idxCache[k] && !sessionDetails.get(k)) {
-                // tags are decoration - their fetch failing must not sink the panel
                 let d: Awaited<ReturnType<typeof bandcampApi.fetchSearchIndex>> | null = null;
                 try { d = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: req.tralbumType === 't' ? 't' : 'a', bandId: req.bandId }, true); } catch { d = null; }
                 if (d && d.ok) {
@@ -1323,8 +1229,6 @@ async function init() {
                     else sessionDetails.set(k, entry);
                 }
             } else if (req.tralbumType !== 't') {
-                // opening an album re-confirms the saved index against the fresh tracklist
-                // (heals stale entries); 't' resolves through the parent, so leave its rows alone.
                 const entry = idxCache[k] || sessionDetails.get(k);
                 if (entry) {
                     const fresh = tracks.map((t) => [t.title, t.duration] as [string, number]);
@@ -1352,11 +1256,10 @@ async function init() {
         }
     });
 
-    // fill in real release years for the collection (bandcamp's collection api omits
-    // them). cached to disk so it's a one-time cost. streams results back as they land.
+    // fill in real release years for the collection (bandcamp's collection api omits them)
     ipcMain.on('collection:enrich-years', async (_e, reqs: { tralbumId: string; tralbumType: TralbumType; bandId: string }[]) => {
         if (!Array.isArray(reqs) || !reqs.length) return;
-        reqs = reqs.filter((r) => !isLocalId(r.tralbumId)); // local years come from tags, never the network
+        reqs = reqs.filter((r) => !isLocalId(r.tralbumId));
         if (!reqs.length) return;
         const store2 = yearsDisk.get();
         const send = (updates: { tralbumId: string; year: number }[]) => {
@@ -1368,8 +1271,6 @@ async function init() {
         const todo: typeof reqs = [];
         for (const r of reqs) {
             const k = r.tralbumType + ':' + r.tralbumId;
-            // only treat a real (non-zero) year as cached; 0 usually means a prior
-            // fetch was throttled, so retry those rather than caching the failure
             if (store2[k]) { cached.push({ tralbumId: r.tralbumId, year: store2[k] }); bandcampApi.primeYear(r.tralbumType, r.tralbumId, store2[k]); }
             else todo.push(r);
         }
@@ -1385,14 +1286,13 @@ async function init() {
                 if (pending.length >= 25) { send(pending.splice(0)); yearsDisk.save(); }
             }
         };
-        await Promise.all([worker(), worker(), worker()]); // modest concurrency to avoid 429s
+        await Promise.all([worker(), worker(), worker()]);
         send(pending.splice(0));
         yearsDisk.save();
         if (collectionView && !collectionView.webContents.isDestroyed()) collectionView.webContents.send('collection:years-done');
     });
 
-    // build the release index (tags + tracklist per item) for search & the list view;
-    // cached to disk. strictly serialized with 429 backoff - bandcamp punishes bursts.
+    // build the release index (tags + tracklist per item) for search & the list view; cached to disk
     interface IndexRow { key: string; blob: string; tags: string[]; tracks: [string, number][] }
     type IndexCacheEntry = { g: string[]; t: [string, number][]; y: number; a?: string };
     const indexRowOf = (k: string, c: IndexCacheEntry): IndexRow => ({
@@ -1402,18 +1302,15 @@ async function init() {
         tracks: c.t || [],
     });
     let indexRunActive = false;
-    // keys of releases actually in the user's collection: the ONLY ones whose
-    // details are persisted to disk (feed items etc. stay session-only).
+    // keys of releases actually in the user's collection: the ONLY ones whose details are persisted to disk
     const collectionKeys = new Set<string>();
-    // last request list (with art urls) so enabling the release cache in settings
-    // can kick off a cover mirror pass without waiting for the next index run
+    // last request list (with art urls)
     let lastIndexReqs: { tralbumId: string; tralbumType: TralbumType; bandId: string; art?: string }[] = [];
     const idxAlive = () => collectionView && !collectionView.webContents.isDestroyed();
     const idxSleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
     const sendIndexStatus = (text: string) => { if (idxAlive()) collectionView.webContents.send('collection:index-status', text); };
 
-    // mirror covers to disk (cdn fetches, light pacing). runs over all items so an
-    // index built before the setting was enabled still gets its covers.
+    // mirror covers to disk (cdn fetches, light pacing)
     let artPassActive = false;
     const mirrorArt = async (reqs: typeof lastIndexReqs) => {
         if (artPassActive || !cacheReleasesOn()) return;
@@ -1438,8 +1335,6 @@ async function init() {
         if (!Array.isArray(reqs) || !reqs.length || indexRunActive) return;
         indexRunActive = true;
         const send = (rows: IndexRow[]) => { if (rows.length && idxAlive()) collectionView.webContents.send('collection:index', rows); };
-        // local pseudo-albums index instantly from the library and must never
-        // reach the bandcamp id paths below.
         const localReqs = reqs.filter((r) => isLocalId(r.tralbumId));
         reqs = reqs.filter((r) => !isLocalId(r.tralbumId));
         if (localReqs.length) {
@@ -1465,8 +1360,6 @@ async function init() {
             return;
         }
         const cache = releaseIndexDisk.get();
-        // the request list IS the collection: remember it & evict anything else
-        // that leaked into the persistent cache (e.g. feed items opened earlier)
         collectionKeys.clear();
         for (const r of reqs) collectionKeys.add(r.tralbumType + toIdStr(r.tralbumId));
         for (const k of Object.keys(cache)) { if (!collectionKeys.has(k)) delete cache[k]; }
@@ -1480,8 +1373,6 @@ async function init() {
             else todo.push(r);
         }
         send(cached);
-        // covers mirror concurrently (light cdn fetches) - previously this waited
-        // for the whole metadata crawl, so covers never cached on big collections
         void mirrorArt(reqs);
 
         // rest for a while, streaming a countdown into the toolbar indicator
@@ -1493,8 +1384,6 @@ async function init() {
             sendIndexStatus('');
         };
 
-        // pacing: crawl in 500-release chunks with a long rest between; repeated 429s
-        // mid-chunk force an immediate rest instead of aborting.
         const CHUNK = 500;
         const CHUNK_REST_S = 60;
         const THROTTLE_REST_S = 120;
@@ -1506,15 +1395,13 @@ async function init() {
         try {
             for (const r of todo) {
                 if (!idxAlive()) break;
-                // yield to user actions: an interactive fetch (tracklist click, feed
-                // page…) parks the crawl briefly so it never steals the 429 budget
                 while (bandcampApi.interactiveIdleMs() < 4000) await idxSleep(1500);
                 let info: { tags: string[]; tracks: { title: string; duration: number }[]; year: number; about: string } | null = null;
                 for (let attempt = 0; attempt < 5; attempt++) {
                     const res = await bandcampApi.fetchSearchIndex(r);
                     if (res.ok) { info = res; break; }
                     if (!res.retryable) break;
-                    await idxSleep(1500 * Math.pow(2, attempt)); // 429: back off & retry
+                    await idxSleep(1500 * Math.pow(2, attempt));
                 }
                 if (info) {
                     hardFails = 0;
@@ -1526,7 +1413,6 @@ async function init() {
                     if (pending.length >= 10) { send(pending.splice(0)); releaseIndexDisk.save(); }
                     doneInChunk++;
                 } else if (++hardFails >= 8) {
-                    // persistently throttled: take a long rest & carry on
                     if (++rests > MAX_RESTS) { if (devMode) console.log('[bcrpc] enrich-index giving up for this session'); break; }
                     hardFails = 0;
                     send(pending.splice(0));
@@ -1541,7 +1427,6 @@ async function init() {
                     releaseIndexDisk.save();
                     await rest(CHUNK_REST_S, 'chunk done');
                 }
-                // adaptive pacing: an idle user's budget goes to the crawl; active browsing slows it down.
                 const idleMs = bandcampApi.interactiveIdleMs();
                 await idxSleep(idleMs > 120_000 ? 200 : idleMs > 30_000 ? 600 : 1500);
             }
@@ -1554,8 +1439,7 @@ async function init() {
         }
     });
 
-    // release details for feed cards etc: collection items go to the persistent
-    // index; anything else stays session-only (never written to disk).
+    // release details for feed cards etc: collection items go to the persistent index
     const sessionDetails = new Map<string, IndexCacheEntry>();
     ipcMain.handle('release:details', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string }) => {
         const type: TralbumType = req.tralbumType === 't' ? 't' : 'a';
@@ -1563,7 +1447,6 @@ async function init() {
         const cache = releaseIndexDisk.get();
         let c = cache[k] || sessionDetails.get(k);
         if (!c) {
-            // interactive: user is looking at the panel right now (crawler yields)
             const res = await bandcampApi.fetchSearchIndex({ tralbumId: req.tralbumId, tralbumType: type, bandId: req.bandId }, true);
             if (res.ok) {
                 c = { g: res.tags, t: res.tracks.map((t) => [t.title, t.duration] as [string, number]), y: res.year };
@@ -1581,11 +1464,10 @@ async function init() {
         return { ok: true, tags: c.g || [], tracks: c.t || [], about: c.a || '', year: c.y || 0 };
     });
 
-    // queue a release (or one song via trackId/trackIndex) without interrupting playback.
+    // queue a release (or one song via trackId/trackIndex) without interrupting playback
     ipcMain.handle('collection:enqueue', async (_e, req: { tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
         try {
             const resolved = await resolveRelease(req);
-            // for a purchased single track, queue just that track (not the whole album)
             let tracks = req.tralbumType === 't' && resolved.tracks[resolved.activeIndex]
                 ? [resolved.tracks[resolved.activeIndex]]
                 : resolved.tracks;
@@ -1650,14 +1532,12 @@ async function init() {
         playlistsDisk.save();
         return { ok: true };
     });
-    // add a whole release or one song to a playlist; resolution matches the
-    // tracklist panel, so anything playable - owned or wishlisted - can be added.
+    // add a whole release or one song to a playlist
     ipcMain.handle('playlists:add', async (_e, req: { id: string; tralbumId: string; tralbumType: TralbumType; bandId: string; trackId?: string; trackIndex?: number }) => {
         try {
             const p = playlistById(req?.id);
             if (!p) return { ok: false, error: 'no such playlist' };
             const resolved = await resolveRelease(req);
-            // a purchased single track adds just itself, not its parent album
             let tracks = req.tralbumType === 't' && resolved.tracks[resolved.activeIndex]
                 ? [resolved.tracks[resolved.activeIndex]]
                 : resolved.tracks;
@@ -1674,7 +1554,7 @@ async function init() {
             const have = new Set(p.entries.map((en) => en.tralbumType + en.tralbumId + ':' + en.id));
             let added = 0;
             for (const t of tracks) {
-                if (have.has(t.tralbumType + t.tralbumId + ':' + t.id)) continue; // already on it
+                if (have.has(t.tralbumType + t.tralbumId + ':' + t.id)) continue;
                 p.entries.push({
                     id: t.id, title: t.title, artist: t.artist, album: t.album, art: t.art,
                     duration: t.duration || 0, url: t.url,
@@ -1706,7 +1586,6 @@ async function init() {
         return { ok: true };
     });
     const playlistQueue = (p: PlaylistT): PlayerTrack[] => p.entries.map((e) => {
-        // local entries point straight at the file; bandcamp streams resolve lazily
         const lt = isLocalId(e.tralbumId) ? localTrackById(e.id) : undefined;
         return {
             id: e.id, title: e.title, artist: e.artist, album: e.album, art: e.art,
@@ -1720,7 +1599,7 @@ async function init() {
         if (!playerView || playerView.webContents.isDestroyed()) return { ok: false, error: 'no player' };
         const queue = playlistQueue(p);
         const active = Math.max(0, Math.min(typeof req.startIndex === 'number' ? req.startIndex : 0, queue.length - 1));
-        trapSeq++; // supersede any in-flight page trap
+        trapSeq++;
         playerView.webContents.send('player:stream-incoming', { queue, activeIndex: active, context: 'playlist', format: 'raw' });
         return { ok: true, count: queue.length };
     });
@@ -1738,8 +1617,7 @@ async function init() {
         playlistsDisk.save();
         return { ok: true };
     });
-    // custom cover: picked from disk, normalized to png immediately (that's also
-    // exactly what the download writes out as playlist-cover.png)
+    // custom cover: picked from disk, normalized to png immediately
     ipcMain.handle('playlists:cover-pick', async (_e, id: unknown) => {
         const p = playlistById(id);
         if (!p) return { ok: false };
@@ -1772,8 +1650,7 @@ async function init() {
         playlistsDisk.save();
         return { ok: true };
     });
-    // download a playlist into <downloads>/<name>/: tracks in playlist order,
-    // playlist-cover.png, description.txt and the order file (m3u default).
+    // download a playlist into <downloads>/<name>/ with cover, description and order file
     ipcMain.handle('playlists:download', (_e, id: unknown) => {
         const p = playlistById(id);
         if (!p || !p.entries.length) return { ok: false, error: 'empty playlist' };
@@ -1800,7 +1677,6 @@ async function init() {
                 fs.mkdirSync(dir, { recursive: true });
                 entry.file = dir;
 
-                // playlist-cover.png: the custom cover, else the first entry's art
                 let coverPng: Buffer | null = null;
                 if (p.cover && fs.existsSync(p.cover)) coverPng = fs.readFileSync(p.cover);
                 else {
@@ -1821,7 +1697,6 @@ async function init() {
                 }
                 if (coverPng) { try { fs.writeFileSync(path.join(dir, 'playlist-cover.png'), coverPng); } catch { /* disk */ } }
 
-                // description.txt: name, the description, and the explicit order
                 const orderLines = p.entries.map((e, i) => `${String(i + 1).padStart(2, '0')}. ${e.artist} - ${e.title}`);
                 const descTxt = p.name + '\n' + '='.repeat(Math.max(4, Math.min(60, p.name.length))) + '\n\n' +
                     (p.desc ? p.desc + '\n\n' : '') + 'Track order:\n' + orderLines.join('\n') + '\n';
@@ -1829,7 +1704,7 @@ async function init() {
 
                 const artCache = new Map<string, Buffer | null>();
                 const files: { file: string; title: string; artist: string; duration: number }[] = [];
-                let skipped = 0; // entries from releases the user doesn't own
+                let skipped = 0;
                 for (let i = 0; i < p.entries.length; i++) {
                     if (dlState.canceled) {
                         prog('cancelled', Math.round((i / p.entries.length) * 100));
@@ -1853,14 +1728,12 @@ async function init() {
                     try {
                         const lt = isLocalId(e.tralbumId) ? localTrackById(e.id) : undefined;
                         if (lt) {
-                            // local file: copied as-is - we never rewrite user files
                             if (!fs.existsSync(lt.file)) continue;
                             const file = path.join(dir, nameOf(path.extname(lt.file).toLowerCase() || '.mp3'));
                             fs.copyFileSync(lt.file, file);
                             files.push({ file, title: e.title, artist: e.artist, duration: e.duration || 0 });
                             continue;
                         }
-                        // bandcamp entry: only releases you own are downloadable
                         if (!ownsRelease(e.tralbumType, e.tralbumId)) { skipped++; continue; }
                         const track = await bandcampApi.resolveStream({ bandId: e.bandId, tralbumId: e.tralbumId, tralbumType: e.tralbumType, trackId: e.id });
                         if (!track || !track.src) continue;
@@ -1892,7 +1765,7 @@ async function init() {
                             fs.writeFileSync(file, buf);
                         }
                         files.push({ file, title: e.title, artist: e.artist, duration: e.duration || track.duration || 0 });
-                        await new Promise((res) => setTimeout(res, 250)); // gentle on the cdn
+                        await new Promise((res) => setTimeout(res, 250));
                     } catch { /* skip this entry, carry on */ }
                 }
 
@@ -1915,12 +1788,9 @@ async function init() {
         return { ok: true, count: p.entries.length };
     });
 
-    // import a bandcamp playlist by url (toolbar menu or the on-page button);
-    // re-importing updates in place (matched by bandcamp id).
+    // import a bandcamp playlist by url (toolbar menu or the on-page button)
     ipcMain.handle('playlists:import', async (_e, url: unknown) => {
         const u = String(url || '').trim().split(/[?#]/)[0];
-        // real urls are bandcamp.com/<username>/playlist/<slug> (bare
-        // /playlist/<id> is accepted too)
         if (!/^https:\/\/[^/]*bandcamp\.com\/(?:[^/]+\/)?playlist\/[^/]+/.test(u)) {
             return { ok: false, error: 'that is not a bandcamp playlist url' };
         }
@@ -1931,8 +1801,6 @@ async function init() {
             id: t.id, title: t.title, artist: t.artist, album: t.album,
             art: t.artId ? `https://f4.bcbits.com/img/a${t.artId}_9.jpg` : '',
             duration: t.duration, url: t.url, bandId: t.bandId,
-            // tracks ride inside their parent album when it's known (same rule
-            // as adding from the collection) so metadata resolves correctly
             tralbumId: t.albumId || t.id, tralbumType: (t.albumId ? 'a' : 't') as TralbumType,
         }));
         const all = playlistsDisk.get();
@@ -1950,8 +1818,6 @@ async function init() {
         if (page.description) p.desc = page.description.slice(0, 2000);
         p.entries = entries;
         playlistsDisk.save();
-        // playlist cover: bandcamp serves image ids both with and without the
-        // art prefix depending on kind - try both, first hit wins
         if (page.imageId && !p.cover) {
             for (const iu of [`https://f4.bcbits.com/img/a${page.imageId}_10.jpg`, `https://f4.bcbits.com/img/${page.imageId}_10.jpg`]) {
                 try {
@@ -1973,16 +1839,14 @@ async function init() {
         return { ok: true, id: p.id, name: p.name, count: entries.length, updated: !created };
     });
 
-    // --- local files library: files are parsed ONCE (tags, duration, art) into the
-    // on-disk index and appear as pseudo-releases; playback goes straight to the file.
+    // --- local files library ----------------------------------------------------
     const announceLocal = () => {
         const locals = localCollectionItems();
         if (locals.length && collectionView && !collectionView.webContents.isDestroyed()) {
             collectionView.webContents.send('collection:items', { items: locals, soFar: locals.length, total: 0 });
         }
     };
-    // shared by the picker and the folder scan; parsing is sync fs work,
-    // so yield the event loop every few files.
+    // shared by the picker and the folder scan
     const localArtDir = path.join(app.getPath('userData'), 'local-art');
     const importLocalFiles = async (paths: string[], skipUnchanged: boolean): Promise<{ added: number; updated: number; skipped: number }> => {
         const lib = localFilesDisk.get();
@@ -2038,8 +1902,7 @@ async function init() {
         if (devMode) console.log('[bcrpc] library:add +' + r.added + ' ~' + r.updated);
         return { ok: true, added: r.added, updated: r.updated };
     });
-    // music-folder scan (opt-in): walk the folder, import new/changed audio,
-    // drop entries whose files vanished. runs at startup / enable / pick / Scan now.
+    // music-folder scan (opt-in): walk the folder, import new/changed audio, drop entries whose files vanished
     let musicScanActive = false;
     const scanMusicFolder = async (): Promise<{ ok: boolean; scanned?: number; added?: number; updated?: number; removed?: number; error?: string }> => {
         if (store.get('musicFolderScan', false) !== true) return { ok: false, error: 'scanning is disabled' };
@@ -2064,8 +1927,6 @@ async function init() {
             };
             walk(dir, 0);
             const r = await importLocalFiles(found, true);
-            // files gone from the folder leave the library (their audio was the
-            // folder's; manual imports from elsewhere are never touched)
             const foundSet = new Set(found);
             const norm = dir.endsWith(path.sep) ? dir : dir + path.sep;
             const lib = localFilesDisk.get();
@@ -2078,7 +1939,6 @@ async function init() {
                 }
                 localFilesDisk.replace(keep);
             }
-            // tell the view about albums that disappeared, then upsert the rest
             const afterKeys = new Set(localGroups().keys());
             const gone = [...beforeKeys].filter((k) => !afterKeys.has(k));
             if (gone.length && collectionView && !collectionView.webContents.isDestroyed()) {
@@ -2101,7 +1961,6 @@ async function init() {
         const keep = lib.filter((t) => localAlbumKey(t) !== want);
         const removed = lib.length - keep.length;
         if (!removed) return { ok: false };
-        // library entries and their cached art go; the audio files themselves stay
         for (const t of lib) {
             if (localAlbumKey(t) === want && t.art) { try { fs.unlinkSync(t.art); } catch { /* gone */ } }
         }
@@ -2112,8 +1971,7 @@ async function init() {
         return { ok: true, removed };
     });
 
-    // drag a cover out of the grid as a real file. CRITICAL: startDrag must be called
-    // synchronously while the gesture is live - hover prefetches, dragstart asks (sync).
+    // drag a cover out of the grid as a real file
     const dragArtFile = (req: { title?: string; artist?: string }): string => {
         const safe = (((req?.artist || '') + ' - ' + (req?.title || 'cover'))
             .replace(/[<>:"/\\|?*]+/g, '').replace(/\s+/g, ' ').slice(0, 80).trim()) || 'cover';
@@ -2124,7 +1982,7 @@ async function init() {
         try {
             const file = dragArtFile(req);
             if (fs.existsSync(file) || artPrefetching.has(file)) return;
-            const url = String(req?.art || '').replace(/_\d+\.jpg([?#].*)?$/, '_10.jpg'); // _10 = full size
+            const url = String(req?.art || '').replace(/_\d+\.jpg([?#].*)?$/, '_10.jpg');
             if (!url.startsWith('https://')) return;
             artPrefetching.add(file);
             const buf = await bandcampApi.fetchBinary(url);
@@ -2151,8 +2009,7 @@ async function init() {
         } catch { /* drag just doesn't start */ }
     });
 
-    // resolve a bandcamp release/track url to tracks & append to the queue. shared
-    // by the right-click menu & the shift-click gesture.
+    // resolve a bandcamp release/track url to tracks & append to the queue
     const enqueueFromUrl = async (url: string) => {
         if (!isBandcampUrl(url) || !/\/(album|track)\//.test(url)) { pageToast('nothing to queue here'); return; }
         try {
@@ -2169,8 +2026,7 @@ async function init() {
     };
     ipcMain.on('app:enqueue-url', (_e, raw: unknown) => enqueueFromUrl(typeof raw === 'string' ? raw : ''));
 
-    // media hotkeys pressed in any view (content pages, header, collection) are
-    // relayed to the player, which owns the audio element.
+    // media hotkeys pressed in any view
     ipcMain.on('player:hotkey', (_e, cmd: unknown) => {
         if (playerView && !playerView.webContents.isDestroyed()) {
             playerView.webContents.send('player:hotkey', String(cmd || ''));
@@ -2183,13 +2039,11 @@ async function init() {
             headerView.webContents.send('nav:url', contentView.webContents.getURL());
         }
     };
-    // per-view did-navigate bindings live in wireContentView; on header (re)load
-    // resync the url bar and tab strip so they aren't blank
+    // per-view did-navigate bindings live in wireContentView
     headerView.webContents.on('did-finish-load', () => { pushUrl(); sendTabsState(); headerView.webContents.send('header:buttons', getHeaderButtons()); });
 
     // lazily resolve a queued track's stream url (collection items only ship metadata)
     ipcMain.handle('player:resolve-stream', async (_e, req: ResolveStreamRequest): Promise<ResolveStreamResponse> => {
-        // local library tracks resolve straight to their file on disk
         if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) {
             const lt = localTrackById(req?.trackId);
             if (lt && fs.existsSync(lt.file)) {
@@ -2216,25 +2070,23 @@ async function init() {
                 };
             }
         } catch {
-            // fall thru to failure resp
         }
         return { token: req.token, ok: false, src: '', duration: 0, error: 'unresolved' };
     });
 
-    // downloads land in the chosen folder w/o a save dialog; the registry backs
-    // the header's downloads panel (Clear drops finished entries).
+    // downloads land in the chosen folder w/o a save dialog
     interface DlEntry { id: number; name: string; state: string; percent: number; file: string; at: number; receivedBytes: number; totalBytes: number; speed: number; lastTime: number; lastBytes: number; }
     const dlRegistry: DlEntry[] = [];
     let dlSeq = 0;
     let downloadsWin: BrowserWindow | null = null;
     let downloadsJustOpened = false;
-    let downloadsClosedAt = 0; // Fixes the double-toggle race condition
+    let downloadsClosedAt = 0;
 
     const getDlHeight = () => {
         const activeCount = dlRegistry.filter(d => d.state === 'progressing').length;
         const visibleRows = Math.max(1, Math.min(3, dlRegistry.length));
-        let h = 42 + (visibleRows * 54) + 16; // 42px header + ~54px per row + padding
-        if (activeCount > 1) h += 44; // 44px footer for overall progress
+        let h = 42 + (visibleRows * 54) + 16;
+        if (activeCount > 1) h += 44;
         return h;
     };
 
@@ -2262,7 +2114,6 @@ async function init() {
                 if (d.totalBytes > 0 && d.receivedBytes > 0) {
                     totalRemainingBytes += Math.max(0, d.totalBytes - d.receivedBytes);
                 } else {
-                    // Fallback for streams where total size isn't initially known (weights it roughly as a 15MB file)
                     const remainingPct = Math.max(0, 100 - d.percent);
                     totalRemainingBytes += (remainingPct / 100) * 15_000_000; 
                 }
@@ -2275,14 +2126,12 @@ async function init() {
             eta = Math.ceil(totalRemainingBytes / totalSpeed);
         }
 
-        // no setBounds here: the renderer measures its real content and asks for a height via downloads:resize.
         downloadsWin.webContents.send('downloads:list', {
             items: dlRegistry, activeCount, overallPercent, eta
         });
     };
 
-    // progress fires many times a second per download; coalesce broadcasts to ~10/s,
-    // state changes go out immediately.
+    // progress fires many times a second per download
     let dlBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
     const broadcastDownloadsSoon = () => {
         if (dlBroadcastTimer) return;
@@ -2315,7 +2164,7 @@ async function init() {
             });
 
             downloadsWin.on('closed', () => {
-                downloadsClosedAt = Date.now(); // Arm the debounce timer
+                downloadsClosedAt = Date.now();
                 downloadsWin = null;
                 if (headerView && !headerView.webContents.isDestroyed()) headerView.webContents.send('downloads:state', false);
             });
@@ -2327,7 +2176,6 @@ async function init() {
     };
 
     ipcMain.on('downloads:toggle', () => {
-        // avoid instantly reopening when the toggle button just closed it
         if (Date.now() - downloadsClosedAt < 200) return;
 
         if (downloadsWin && !downloadsWin.isDestroyed()) { 
@@ -2338,7 +2186,7 @@ async function init() {
         }
     });
 
-    // the popup measures its real content and asks for that height; >4 rows scrolls renderer-side.
+    // the popup measures its real content and asks for that height
     ipcMain.on('downloads:resize', (_e, h: unknown) => {
         if (!downloadsWin || downloadsWin.isDestroyed()) return;
         const want = Math.max(80, Math.min(600, Math.round(Number(h) || 0)));
@@ -2367,8 +2215,6 @@ async function init() {
 
         const name = item.getFilename();
         try { item.setSavePath(path.join(getDownloadDir(), name)); } catch { /* let electron pick */ }
-        // a row we already showed while bandcamp encoded the file takes over here
-        // rather than leaving a stale "preparing" line next to the real transfer
         const claimedId = awaitingTransfer.shift();
         const claimed = claimedId ? dlRegistry.find((d) => d.id === claimedId && d.state === 'preparing') : undefined;
         const entryId = claimed ? claimed.id : ++dlSeq;
@@ -2458,14 +2304,13 @@ async function init() {
             const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             out = `<?wpl version="1.0"?>\n<smil>\n<head><title>${esc(album)}</title></head>\n<body><seq>\n` +
                 names.map((n) => `<media src="${esc(n)}"/>`).join('\n') + '\n</seq></body>\n</smil>\n';
-        } else { // m3u (default)
+        } else {
             out = '#EXTM3U\n' + files.map((f, i) =>
                 `#EXTINF:${f.duration || -1},${f.artist} - ${f.title}\n${names[i]}`).join('\n') + '\n';
         }
         try { fs.writeFileSync(path.join(dir, (baseName || sanitizeName(album)) + '.' + fmt), out, 'utf8'); } catch { /* disk */ }
     }
-    // ownership check for the on-page download button: owned collection items
-    // carry their bandcamp redownload page url
+    // ownership check for the on-page download button: owned collection items carry their bandcamp redownload page url
     ipcMain.handle('release:download-info', (_e, req: { tralbumId?: string; tralbumType?: string }) => {
         const id = toIdStr(req?.tralbumId);
         const type = req?.tralbumType === 't' ? 't' : 'a';
@@ -2485,18 +2330,15 @@ async function init() {
         }
     });
 
-    // prepare (if needed) & start a download of a chosen format url.
-    // prepared ids whose transfer hasn't started yet (claimed by will-download):
+    // prepare (if needed) & start a download of a chosen format url
     const awaitingTransfer: number[] = [];
     ipcMain.handle('download:start', async (_e, formatUrl: string) => {
-        // bandcamp encodes the requested format on demand; show a live "preparing"
-        // row immediately so the wait is visible.
         openDownloadsPanel();
         const entryId = ++dlSeq;
         const entry: DlEntry = { id: entryId, name: 'Preparing on Bandcamp...', state: 'preparing', percent: 0, file: '', at: Date.now(), receivedBytes: 0, totalBytes: 0, speed: 0, lastTime: Date.now(), lastBytes: 0 };
         dlRegistry.unshift(entry);
         const prep = { canceled: false };
-        streamDownloads.set(entryId, prep); // reuses the panel's cancel plumbing
+        streamDownloads.set(entryId, prep);
         broadcastDownloads();
         try {
             const finalUrl = await bandcampApi.prepareDownload(formatUrl, {
@@ -2511,7 +2353,6 @@ async function init() {
             if (!finalUrl) { entry.state = 'interrupted'; broadcastDownloads(); return { ok: false, error: 'cancelled' }; }
             awaitingTransfer.push(entryId);
             session.downloadURL(finalUrl);
-            // never leave a ghost row if bandcamp never starts the transfer
             setTimeout(() => {
                 if (entry.state !== 'preparing') return;
                 const i = awaitingTransfer.indexOf(entryId);
@@ -2532,8 +2373,7 @@ async function init() {
         }
     });
 
-    // custom player is the single source of now-playing truth (discord + last.fm);
-    // the release page's inline player mirrors OUR playback via the preload.
+    // custom player is the single source of now-playing truth (discord + last.fm)
     ipcMain.on('player:seek-frac', (_e, frac: unknown) => {
         if (playerView && !playerView.webContents.isDestroyed()) {
             playerView.webContents.send('player:seek-frac', Number(frac) || 0);
@@ -2606,7 +2446,6 @@ async function init() {
         });
         if (res.canceled || !res.filePaths.length) return { ok: false, dir: stored };
         store.set('musicFolder', res.filePaths[0]);
-        // folder changed while scanning is on: refresh right away
         if (store.get('musicFolderScan', false) === true) setTimeout(() => { void scanMusicFolder(); }, 300);
         return { ok: true, dir: res.filePaths[0] };
     });
@@ -2655,8 +2494,6 @@ async function init() {
         try {
             const existing = (store.get('lastfm') as any) || {};
             const incomingLfm = { ...(data.lastfm || {}) };
-            // a BLANK key/secret never overwrites a stored one (a settings window whose load
-            // failed posts empty fields, silently killing scrobbling until re-entered).
             if (!String(incomingLfm.apiKey || '').trim() && existing.apiKey) delete incomingLfm.apiKey;
             if (!String(incomingLfm.apiSecret || '').trim() && existing.apiSecret) delete incomingLfm.apiSecret;
             store.set('lastfm', { ...existing, ...incomingLfm });
@@ -2679,20 +2516,18 @@ async function init() {
             if (typeof data.closeToTray === 'boolean') store.set('closeToTray', data.closeToTray);
             if (typeof data.discordClientId === 'string') {
                 store.set('discordClientId', data.discordClientId.trim());
-                presenceService.reconnect(); // apply new app id now
+                presenceService.reconnect();
             }
             if (typeof data.autoLoadCollection === 'boolean') store.set('autoLoadCollection', data.autoLoadCollection);
             if (typeof data.musicFolderScan === 'boolean') {
                 const was = store.get('musicFolderScan', false) === true;
                 store.set('musicFolderScan', data.musicFolderScan);
-                // freshly enabled: scan now instead of waiting for the next boot
                 if (data.musicFolderScan && !was) setTimeout(() => { void scanMusicFolder(); }, 300);
             }
             if (typeof data.dlPlaylistFormat === 'string' && ['m3u', 'pls', 'wpl', 'zpl', 'none'].includes(data.dlPlaylistFormat)) store.set('dlPlaylistFormat', data.dlPlaylistFormat);
             if (typeof data.cacheReleases === 'boolean') {
                 const wasOn = cacheReleasesOn();
                 store.set('cacheReleases', data.cacheReleases);
-                // freshly enabled: start mirroring covers now (not on the next boot)
                 if (data.cacheReleases && !wasOn && lastIndexReqs.length) void mirrorArt(lastIndexReqs);
             }
             if (data.headerButtons && typeof data.headerButtons === 'object') {
@@ -2713,7 +2548,7 @@ async function init() {
             }
             if (data.discordOpts && typeof data.discordOpts === 'object') {
                 if (typeof data.discordOpts.showWhenPaused === 'boolean') store.set('discordShowWhenPaused', data.discordOpts.showWhenPaused);
-                presenceService.refresh(); // re-send the live activity with new options
+                presenceService.refresh();
             }
             let themeChanged = false;
             if (typeof data.theme === 'string') {
@@ -2725,7 +2560,6 @@ async function init() {
                 if (data.darkArtistPages !== (store.get('darkArtistPages', false) === true)) themeChanged = true;
                 store.set('darkArtistPages', data.darkArtistPages);
             }
-            // reload every tab so the cloak/darkreader state flips
             if (themeChanged) tabs.forEach((t) => { if (!t.view.webContents.isDestroyed()) t.view.webContents.reload(); });
             if (devMode) console.log('[bcrpc] settings:save ok keys=' + JSON.stringify(Object.keys(data || {})));
             return { ok: true };
@@ -2740,7 +2574,6 @@ async function init() {
         const res = await lastfmService.beginAuth();
         if ('authUrl' in res) {
             shell.openExternal(res.authUrl);
-            // auto-detect when the user finishes authorizing (no manual button)
             lastfmService.pollForSession().then((r) => {
                 if (devMode) console.log('[bcrpc] lastfm auto-auth ' + JSON.stringify(r));
                 if (settingsWindow && !settingsWindow.isDestroyed()) {
@@ -2760,8 +2593,6 @@ async function init() {
                 nodeIntegration: false,
                 contextIsolation: true,
                 sandbox: true,
-                // webSecurity off so the in-page extractor can hit bandcamp apis cross-origin;
-                // otherwise sandboxed/context-isolated. intentional trade-off (CodeQL flags it).
                 webSecurity: false,
                 devTools: devMode,
                 autoplayPolicy: 'no-user-gesture-required',
@@ -2784,7 +2615,6 @@ async function init() {
             if (isMainFrame && isActive()) { trapSeq++; userGestureAt = 0; bandcampApi.noteInteractive(); }
         });
 
-        // open-in-new: bandcamp links -> new in-app tab; external links -> new window; plain foreground links stay in place
         wc.setWindowOpenHandler((details) => {
             const asNew = details.disposition === 'background-tab' || details.disposition === 'new-window';
             if (asNew && isBandcampUrl(details.url)) newTab(details.url, details.disposition !== 'background-tab');
@@ -2793,8 +2623,7 @@ async function init() {
             return { action: 'deny' };
         });
 
-        // right-click menu: add-to-queue (linked release, or the release you're on),
-        // copy link, open in tab/window, copy selection
+        // right-click menu: add-to-queue
         wc.on('context-menu', (_e, params) => {
             const link = params.linkURL || '';
             const pageUrl = wc.getURL();
@@ -2816,8 +2645,7 @@ async function init() {
             if (tmpl.length) Menu.buildFromTemplate(tmpl).popup();
         });
 
-        // social/promo links open a separate window; limited to a known list so
-        // bandcamp itself and checkout/oauth redirects stay in-app.
+        // social/promo links open a separate window
         wc.on('will-navigate', (event, url) => {
             if (isSocialHost(url)) { event.preventDefault(); openInNewWindow(url); }
         });
@@ -2828,12 +2656,10 @@ async function init() {
             if (tab) {
                 let ti = wc.getTitle() || '';
                 
-                // Strip the trailing " | Bandcamp"
                 if (ti.endsWith(' | Bandcamp')) {
                     ti = ti.replace(' | Bandcamp', '');
                 }
                 
-                // Use the URL path (like /discover/) if title is just "Bandcamp" or empty
                 if (ti === 'Bandcamp' || ti.trim() === '') {
                     try {
                         const u = new URL(wc.getURL());
@@ -2856,8 +2682,7 @@ async function init() {
         wc.on('did-navigate-in-page', onNav);
         wc.on('page-title-updated', onNav);
 
-        // grey-hang failsafe: if darkreader never paints within a few seconds,
-        // drop the cloak and force the body visible (worst case: brief unthemed flash).
+        // grey-hang failsafe: lift the cloak if darkreader never paints
         const liftCloakIfStuck = () => {
             setTimeout(() => {
                 if (wc.isDestroyed()) return;
@@ -2879,8 +2704,8 @@ async function init() {
         wc.on('dom-ready', async () => {
             try {
                 await wc.insertCSS(SEARCHBOX_CSS);
-                liftCloakIfStuck(); // arm the de-grey failsafe on every load path
-                if (themeForUrl(wc.getURL()) === 'light') return; // no darkreader in light mode / on exempt artist pages
+                liftCloakIfStuck();
+                if (themeForUrl(wc.getURL()) === 'light') return;
                 await wc.executeJavaScript(`
                     (function() {
                         if (window.__darkReaderActive) return;
@@ -2915,8 +2740,7 @@ async function init() {
             } catch (err) { console.error('Failed to inject Pre-Theme CSS:', err); }
         });
 
-        // a page navigation that itself gets HTTP 429 renders an empty shell that
-        // the dark cloak turns into a silent grey hang. say WHY and offer reload.
+        // a navigation that itself gets HTTP 429 renders an empty shell: say why and offer reload
         wc.on('did-navigate', (_e: any, _url: string, httpResponseCode: number) => {
             if (httpResponseCode !== 429) return;
             try { bandcampApi.on429?.(); } catch { /* notice best-effort */ }
@@ -2945,21 +2769,18 @@ async function init() {
             if (handleShortcut(input)) event.preventDefault();
         });
 
-        // track when the page's renderer wedges (e.g. bandcamp's >1000 collection
-        // sort) so hardLoad knows to drop it rather than wait on the stuck renderer
+        // track when the page's renderer wedges so hardLoad can drop it
         wc.on('unresponsive', () => { (wc as any).__hung = true; });
         wc.on('responsive', () => { (wc as any).__hung = false; });
 
-        // ignore page beforeunload guards: electron CANCELS navigations they try to block,
-        // which killed link clicks / refresh / home on bandcamp's collection reorder page.
+        // ignore page beforeunload guards (electron cancels navigations they try to block)
         wc.on('will-prevent-unload', (event) => { event.preventDefault(); });
     }
 
-    // swap the visible tab; restore overlay stacking (content < collection < header < player)
+    // swap the visible tab
     function setActiveTab(id: number): void {
         const tab = tabs.find((t) => t.id === id);
         if (!tab) return;
-        // re-activating the current tab: just resync the strip, don't re-add the view
         if (activeTabId === id && contentView === tab.view) { sendTabsState(); return; }
         const prev = contentView;
         activeTabId = id;
@@ -2977,7 +2798,7 @@ async function init() {
         sendTabsState();
     }
 
-    // open a new tab (bandcamp link); returns its id
+    // open a new tab (bandcamp link)
     function newTab(url: string, activate = true): number {
         const view = makeContentView();
         wireContentView(view);
@@ -2995,7 +2816,7 @@ async function init() {
         const tab = tabs[idx];
         const wasActive = activeTabId === id;
         tabs.splice(idx, 1);
-        if (!tabs.length) newTab('https://bandcamp.com', true); // never leave zero tabs
+        if (!tabs.length) newTab('https://bandcamp.com', true);
         else if (wasActive) setActiveTab(tabs[Math.min(idx, tabs.length - 1)].id);
         else sendTabsState();
         if (!tab.view.webContents.isDestroyed()) {
@@ -3014,7 +2835,7 @@ async function init() {
     ipcMain.on('tab:activate', (_e, id: number) => setActiveTab(id));
     ipcMain.on('tab:close', (_e, id: number) => closeTab(id));
     ipcMain.on('tab:new', () => newTab('https://bandcamp.com', true));
-    // middle-click from preload: bandcamp links -> background in-app tab; external -> new window
+    // middle-click from preload: bandcamp links -> background in-app tab
     ipcMain.on('app:open-tab', (_e, url: unknown) => {
         const u = typeof url === 'string' ? url : '';
         if (!/^https?:\/\//i.test(u)) return;
@@ -3022,10 +2843,9 @@ async function init() {
         else openInNewWindow(u);
     });
 
-    // resolve a page url for a now-playing track that has none (e.g. homepage
-    // playlist tracks) so the player's title/artist links work
+    // resolve a page url for a now-playing track that has none
     ipcMain.handle('player:resolve-page', async (_e, req: { trackId?: string; bandId?: string; tralbumId?: string; tralbumType?: TralbumType }) => {
-        if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) return { ok: false, url: '' }; // no page for local files
+        if (isLocalId(req?.tralbumId) || String(req?.trackId || '').startsWith('L')) return { ok: false, url: '' };
         try {
             const url = await bandcampApi.resolvePageUrl(req);
             return { ok: Boolean(url), url: url || '' };
@@ -3042,14 +2862,11 @@ async function init() {
     adjustContentViews();
     setTimeout(() => { void offerInstallerCleanup(); }, 1500);
 
-    // opt-in music-folder scan, shortly after startup so it never competes with
-    // the window coming up (no-op unless enabled in settings)
     if (store.get('musicFolderScan', false) === true) {
         setTimeout(() => { void scanMusicFolder(); }, 4000);
     }
 
-    // --- auto updates (packaged builds only). the feed is set EXPLICITLY at runtime:
-    // old builds have app-update.yml baked pointing at bandcamp-rpc (404s silently).
+    // --- auto updates (packaged builds only) ----------------------------------
     let updStatus: { state: string; info: string } = { state: 'idle', info: '' };
     const pushUpdStatus = (state: string, info = '') => {
         updStatus = { state, info };
@@ -3071,7 +2888,6 @@ async function init() {
                 }
             });
             autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-            // long-running sessions still pick updates up
             setInterval(() => { autoUpdater.checkForUpdatesAndNotify().catch(() => {}); }, 4 * 60 * 60 * 1000);
         } catch { /* no update feed configured */ }
     }
@@ -3092,6 +2908,5 @@ async function init() {
 app.whenReady().then(init);
 app.on('before-quit', () => {
     isQuitting = true;
-    // make sure debounced cache writes hit disk before the process dies
     try { releaseIndexDisk?.flush(); collectionItemsDisk?.flush(); yearsDisk?.flush(); playlistsDisk?.flush(); localFilesDisk?.flush(); } catch { /* disk */ }
 });
