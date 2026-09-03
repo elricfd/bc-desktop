@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { pathToFileURL } from 'url';
 import { platform } from 'os';
+import { execFile } from 'child_process';
 import Store from 'electron-store';
 import { autoUpdater } from 'electron-updater';
 
@@ -343,6 +344,39 @@ function setupTray() {
     } else {
         tray.setContextMenu(menu);
         tray.on('click', toggle);
+    }
+}
+
+// mac: after a drag-install the .dmg is usually still mounted. on the first launch
+// from /Applications offer to eject it and move the image to the Trash (once per image).
+const run = (file: string, args: string[], timeout: number) => new Promise<string>((resolve, reject) =>
+    execFile(file, args, { timeout }, (err, out) => (err ? reject(err) : resolve(String(out)))));
+async function offerInstallerCleanup(): Promise<void> {
+    if (!isMac || !app.isPackaged || !mainWindow || mainWindow.isDestroyed()) return;
+    const bundle = path.resolve(process.execPath, '../../..');
+    if (bundle.startsWith('/Volumes/')) return; // running straight from the dmg: ejecting would kill us
+    let images: any[] = [];
+    try {
+        images = JSON.parse(await run('/bin/sh', ['-c', 'hdiutil info -plist | plutil -convert json -o - -'], 8000)).images || [];
+    } catch { return; }
+    for (const img of images) {
+        const dmg = String(img['image-path'] || '');
+        const mount = ((img['system-entities'] || []) as any[])
+            .map((e) => String(e['mount-point'] || ''))
+            .find((m) => m && fs.existsSync(path.join(m, path.basename(bundle))));
+        if (!dmg || !mount) continue;
+        if (store.get('installerCleanupAsked') === dmg) return;
+        store.set('installerCleanupAsked', dmg);
+        const { response } = await dialog.showMessageBox(mainWindow, {
+            type: 'question', buttons: ['Eject and Move to Trash', 'Not Now'], defaultId: 0, cancelId: 1,
+            message: 'Bandcamp is installed',
+            detail: `Eject the installer disk image "${path.basename(dmg)}" and move it to the Trash?`,
+        });
+        if (response !== 0) return;
+        try { await run('hdiutil', ['detach', mount], 15000); }
+        catch { try { await run('hdiutil', ['detach', '-force', mount], 15000); } catch { return; } }
+        try { await shell.trashItem(dmg); } catch { /* image already gone */ }
+        return;
     }
 }
 
@@ -3006,6 +3040,7 @@ async function init() {
     await contentView.webContents.loadURL('https://bandcamp.com');
     mainWindow.show();
     adjustContentViews();
+    setTimeout(() => { void offerInstallerCleanup(); }, 1500);
 
     // opt-in music-folder scan, shortly after startup so it never competes with
     // the window coming up (no-op unless enabled in settings)
